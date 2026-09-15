@@ -1371,3 +1371,186 @@ describing 150 nodes 0.029 ms.
 - No screen reader has actually been run against this. Every claim here is about
   roles, labels and focus order being correct by construction and by test —
   which is necessary and not sufficient.
+
+---
+
+## Phase 9 — tests
+
+### What landed
+
+```
+vite.config.ts            two Vitest projects: pure logic in Node, components in jsdom
+tests/setup-dom.ts        the three stubs jsdom needs to mount anything here
+src/**/*.test.ts          189 unit and component tests, next to what they test
+e2e/                      22 Playwright tests against the production build
+tools/bench-*.ts          the old verify-* harnesses, now purely measurement
+```
+
+`npm test` is the gate. `npm run test:e2e` is the browser half. `npm run bench`
+is where NOTES' numbers come from.
+
+### Three things the tests found
+
+This is the part worth reading. All three had been shipped, and two of them
+break a headline feature of an earlier phase.
+
+**1. A `$state` created inside a `$derived` does not register as a dependency.**
+
+`DynamicsStore.view()` allocated a node's reactive cell on first read. That read
+happens inside `$derived(dynamics.view(index))` in `GraphNode`, so the very first
+render of a node both created its cell and tried to subscribe to it — and the
+subscription did not stick. The node then **never repainted, however many times
+it was notified**. Phase 6's entire claim, "a status change repaints one node",
+was false for every DOM node in the app.
+
+Nothing caught it before because every phase 6 and 7 test asserted *routing* —
+which index got notified — against a `$state = identity` shim. Routing was
+perfect. The component test that mounts two nodes, changes both, notifies one,
+and checks that only one moved is the first thing that ran real signals through
+a real component, and it failed immediately.
+
+`untrack()` around the creation does not help: the problem is *when* the signal
+is created, not what is tracked while it is. The fix is to allocate every cell
+in the constructor, which moves signal creation out of any reactive context.
+That is the design I had explicitly rejected — 10,000 signals to serve a few
+hundred rendered elements — so I measured what it actually costs:
+
+```
+500 nodes: 0.027 ms     2,000 nodes: 0.030 ms     10,000 nodes: 0.139 ms
+```
+
+A seventh of a millisecond, once per fixture load, against a 40 ms generate.
+The laziness was never worth anything; I had just assumed it was.
+
+**2. `aria-selected` in the accessible tree never changed.**
+
+`AccessibleGraph` read `selection.nodeFlags[i]` directly. The flags are a plain
+`Uint8Array` — deliberately, so the canvas can read them every frame without a
+proxy — and a plain array cannot be observed. `TablePane` got this right because
+phase 7 had to add `selection.version` for it; the tree, written a phase later,
+did not. A screen reader user would have been told nothing was ever selected.
+
+The tell is that the *fix* was already in the codebase, one file away. A
+convention that has to be remembered is a convention that will be forgotten.
+
+**3. ELK cannot lay out 10,000 nodes in a browser.**
+
+Three Playwright tests timed out waiting for the layout. The status reads
+`layout failed`, after two seconds, with `Maximum call stack size exceeded`.
+
+This is not phase 2's intermittent warm-instance defect — the fresh-worker retry
+fails too, deterministically. It is that a browser worker's stack is smaller
+than Node's, and elkjs is GWT-compiled Java with deep recursion. **Every 10k
+layout measurement in this file, from phase 2 onward, was taken in Node**, and
+phase 3's lesson about "verified everywhere except the target environment" turns
+out to have had one more instance in it than I found at the time.
+
+The app degrades rather than breaking: the placeholder layered layout stays on
+screen and everything else — culling, semantic zoom, the canvas fallback,
+picking, streaming, the keyboard — works normally on it. The e2e tests
+therefore wait for the layout to *settle*, either way, and carry on. Worth
+saying plainly though: **the 10,000-node fixture has never had an ELK layout in
+a browser**, and the honest fixes are chunked layout or a different engine,
+neither of which belongs in a testing phase.
+
+### Decisions
+
+**Two Vitest projects.** Most of this codebase is deliberately free of the DOM —
+transform maths, quadtree, layout diff, batcher, virtual window, keyboard
+navigation — and runs fastest and most honestly in plain Node. Only components
+need jsdom, which is slow and unlike a browser, so it is confined to
+`*.dom.test.ts`. Both extend the Vite config, so `$lib` resolves and `.svelte.ts`
+modules compile — which is what let the first bug above be caught at all.
+
+**End-to-end runs against the production build, not the dev server.** The thing
+under test is frame time; the dev server serves hundreds of unbundled modules
+and would be measuring Vite. It is also where the elkjs worker is emitted as its
+own chunk.
+
+**The perf assertion reads the app's own HUD.** A second instrument would
+measure something adjacent to what the project has been tuned against. `frame`
+is the mean time inside the draw call — our JavaScript, not rasterisation —
+which is exactly what every number in this file means.
+
+**The e2e budget is the frame budget, not the measured number.** Headless
+timings are noisier than a real session. A regression that matters will blow
+through 16.7 ms; one that does not will not; and a test that flakes gets
+ignored, which is worse than no test.
+
+**`tools/` became benchmarks and kept its assertions.** Correctness now lives in
+Vitest. These still check before they measure, because a benchmark that measures
+broken code reports a meaningless number — usually a flatteringly fast one.
+
+### What surprised me
+
+**My own tests were wrong three times, in ways that were really findings.**
+
+- The fixture buttons render `10,000`, not `10000`, so `getByRole('button',
+  {name: '10000'})` never matched.
+- `.node-layer .node` was empty after loading a fixture. Not a bug — fit-to-screen
+  lands *below* the dot threshold at every fixture size, which phase 5 recorded
+  and I had forgotten by the time I was writing browser tests against it.
+- `.first()` node element is often **off screen**, because the cull margin keeps
+  nodes for 160px beyond the viewport edge. Clicking its centre clicks nothing.
+
+Each of those is a real property of the app that only became visible when
+something external tried to drive it.
+
+**The suite got 9x faster by fixing failures, not by optimising.** 6.6 minutes
+to 45 seconds — almost all of it was failing tests sitting on their timeouts.
+
+### Measured
+
+```
+npm test       189 tests, 14 files, ~3 s      (unit in Node, components in jsdom)
+npm run test:e2e   22 tests                   ~46 s against the production build
+npm run bench      5 benchmark scripts        all assertions still green
+```
+
+Unit and component coverage:
+
+| file | tests | |
+|------|-------|---|
+| `a11y/navigate.test.ts` | 55 | navigation, tree membership, shortcut table |
+| `render/virtual.test.ts` | 17 | windowing to a million rows |
+| `interact/selection.test.ts` | 15 | flags, versions, marquee commits |
+| `stream/batcher.test.ts` | 14 | coalescing, off-screen updates, DOM mode |
+| `layout/incremental.test.ts` | 13 | dirty region, translation fitting |
+| `components/AccessibleGraph.dom.test.ts` | 13 | roles, labels, focus, arrow targets |
+| `components/TablePane.dom.test.ts` | 13 | virtualization, rows, keyboard |
+| `render/viewport.test.ts` | 10 | transform round-trip, zoom anchor, fit, grid |
+| `interact/quadtree.test.ts` | 10 | picking vs brute force, coincident points |
+| `interact/bezier.test.ts` | 9 | adaptive flattening against a 4,096-segment reference |
+| `a11y/describe.test.ts` | 8 | spoken labels |
+| `render/cull.test.ts` | 6 | both geometries, never under-accepting |
+| `components/GraphNode.dom.test.ts` | 5 | per-node repaint, for real |
+| `graph/dynamics.alloc.test.ts` | 1 | what eager cells cost |
+
+Frame time in a real browser, read off the HUD — the first such numbers in this
+file, everything before it having been our JavaScript measured in Node:
+
+| | mean | worst |
+|---|------|-------|
+| 2,000 nodes, panning | 0.3 ms | 0.5 ms |
+| 2,000 nodes, panning, feed at 200/s | 0.3 ms | — |
+| 10,000 nodes, panning | 1.3 ms | 1.3 ms |
+
+Comfortably inside 16.7 ms, and close to the stub-context numbers phase 5
+recorded, which is reassuring about the benchmarks rather than about the app.
+
+### Known limitations, carried forward
+
+- **The 10,000-node fixture has no ELK layout in a browser.** See above. The
+  placeholder layout is what those tests, and anyone opening that fixture,
+  are actually looking at.
+- One browser. Chromium only; no Firefox or WebKit project, so nothing here
+  says anything about `deltaMode`, pointer capture or canvas behaviour outside
+  Blink — all three of which have bitten this codebase in review already.
+- No screen reader, still. The accessible tree is tested for roles, labels and
+  focus order, which is necessary and not sufficient.
+- jsdom has no layout, so the component tests stub `clientHeight` and assert
+  structure only. Anything about pixels is either a pure-maths unit test or a
+  Playwright assertion.
+- The e2e perf tests assert the frame budget rather than a tight number, so a
+  2x regression that stays under 16.7 ms would pass silently. `npm run bench`
+  is where a regression of that size would show.

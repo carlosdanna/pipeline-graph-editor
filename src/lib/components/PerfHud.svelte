@@ -31,91 +31,91 @@
 </script>
 
 <aside class="hud" aria-live="off">
-	<div class="row">
+	<div class="row" data-hud="fps">
 		<span class="key">fps</span>
 		<span class="value" class:bad={perf.active && perf.fps < 55}>
 			{perf.active ? perf.fps : '—'}
 		</span>
 	</div>
-	<div class="row">
+	<div class="row" data-hud="frame">
 		<span class="key">frame</span>
 		<span class="value" class:bad={perf.frameMs > 16.7}>{perf.frameMs.toFixed(1)} ms</span>
 	</div>
-	<div class="row">
+	<div class="row" data-hud="worst">
 		<span class="key">worst</span>
 		<span class="value" class:bad={perf.frameMaxMs > 16.7}>{perf.frameMaxMs.toFixed(1)} ms</span>
 	</div>
-	<div class="row">
+	<div class="row" data-hud="nodes">
 		<span class="key">nodes</span>
 		<span class="value">
 			{perf.visibleNodes.toLocaleString()} / {perf.totalNodes.toLocaleString()}
 		</span>
 	</div>
-	<div class="row">
+	<div class="row" data-hud="edges">
 		<span class="key">edges</span>
 		<span class="value">
 			{perf.visibleEdges.toLocaleString()} / {perf.edgeCount.toLocaleString()}
 		</span>
 	</div>
-	<div class="row">
+	<div class="row" data-hud="culled">
 		<span class="key">culled</span>
 		<!-- What phase 5 is buying, in one number. -->
 		<span class="value" class:good={culledNodes + culledEdges > 0}>
 			{(culledNodes + culledEdges).toLocaleString()}
 		</span>
 	</div>
-	<div class="row">
+	<div class="row" data-hud="zoom">
 		<span class="key">zoom</span>
 		<span class="value">{perf.zoom.toFixed(3)}x</span>
 	</div>
-	<div class="row">
+	<div class="row" data-hud="detail">
 		<span class="key">detail</span>
 		<span class="value" class:stale={perf.detail !== 'full'}>{perf.detail}</span>
 	</div>
-	<div class="row">
+	<div class="row" data-hud="nodes-via">
 		<span class="key">nodes via</span>
 		<span class="value">{perf.nodesOnCanvas ? 'canvas' : 'dom'}</span>
 	</div>
 	{#if feed.active}
 		<div class="rule"></div>
-		<div class="row">
+		<div class="row" data-hud="updates">
 			<span class="key">updates</span>
 			<span class="value">{feed.updates.toLocaleString()}/s</span>
 		</div>
-		<div class="row">
+		<div class="row" data-hud="coalesced">
 			<span class="key">coalesced</span>
 			<!-- Updates that hit a node already dirty this frame, and cost nothing. -->
 			<span class="value" class:good={feed.coalesced > 0}>
 				{feed.coalesced.toLocaleString()}/s
 			</span>
 		</div>
-		<div class="row">
+		<div class="row" data-hud="notified">
 			<span class="key">notified</span>
 			<span class="value">{feed.notified.toLocaleString()}/s</span>
 		</div>
-		<div class="row">
+		<div class="row" data-hud="flushes">
 			<span class="key">flushes</span>
 			<span class="value">{feed.flushes.toLocaleString()}/s</span>
 		</div>
-		<div class="row">
+		<div class="row" data-hud="on-screen">
 			<span class="key">on screen</span>
 			<!-- Flushes where a *visible* node changed. Everything else drew nothing. -->
 			<span class="value">{feed.visibleChanges.toLocaleString()}/s</span>
 		</div>
-		<div class="row">
+		<div class="row" data-hud="repaints">
 			<span class="key">repaints</span>
 			<!-- Canvas frames the feed caused. Zero while nodes are DOM elements. -->
 			<span class="value" class:good={feed.repaints === 0}>
 				{feed.repaints.toLocaleString()}/s
 			</span>
 		</div>
-		<div class="row">
+		<div class="row" data-hud="unseen">
 			<span class="key">unseen</span>
 			<span class="value" class:good={offscreen > 0}>{offscreen.toLocaleString()}/s</span>
 		</div>
 	{/if}
 
-	<div class="row">
+	<div class="row" data-hud="layout">
 		<span class="key">layout</span>
 		<span class="value">
 			{perf.layoutMs === null

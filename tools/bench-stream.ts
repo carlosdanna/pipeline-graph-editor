@@ -135,8 +135,8 @@ console.log('\n=== an off-screen update schedules nothing ===\n');
 	check('they still queue exactly one flush', pendingFrames.length === 1);
 	runFrame();
 	check('and the data is current anyway', h.dynamics.throughput[900] === 900);
-	check('nothing renders them, so nothing is notified with a cell',
-		h.dynamics.cellCount === 0, `${h.dynamics.cellCount} cells`);
+	check('they are still notified, so a later render is correct',
+		h.notified.length === 1000, `${h.notified.length} notified`);
 }
 
 {

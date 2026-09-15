@@ -18,10 +18,24 @@ import { NODE_STATUSES, type NodeDynamics, type NodeStatus } from './types';
  * asks for a status change to repaint *one* node, and an array of objects
  * cannot express that however it is wrapped.
  *
- * Why not one signal per node, allocated up front: 10,000 signals to serve at
- * most a few hundred rendered elements. Cells are created on first read and
- * kept, so the count converges on "nodes that have been on screen", which the
- * cull margin already bounds.
+ * The cells are allocated **up front**, one per node, and that is not the
+ * design I wanted. Creating them lazily on first read is obviously better —
+ * 10,000 signals to serve a few hundred rendered elements is waste — and it is
+ * what this did until phase 9's component tests caught it silently not working.
+ *
+ * A `$state` created *during the evaluation of a `$derived`* does not reliably
+ * register as a dependency of that derived. `view()` is called from
+ * `$derived(dynamics.view(index))` inside `GraphNode`, so the very first render
+ * of a node both created its cell and tried to subscribe to it, and the
+ * subscription did not stick: the node then never repainted, however many times
+ * it was notified. `untrack()` around the creation does not help, because the
+ * problem is when the signal is created rather than what is tracked while it is.
+ *
+ * Allocating in the constructor moves every signal's creation out of any
+ * reactive context, which removes the whole class of problem. The cost is one
+ * pass at fixture load — measured at about a millisecond for 10,000 nodes,
+ * against a 40 ms generate and a multi-second layout — and some memory that is
+ * small next to the position and anchor arrays.
  *
  * The canvas path ignores all of this and reads the typed arrays directly. It
  * does not need reactivity — it is redrawn by the frame loop, not by Svelte.
@@ -38,6 +52,8 @@ export function statusIndex(status: NodeStatus): number {
 }
 
 export interface LiveDynamics {
+	/** Bumped on every notification. Carried so the subscribing read cannot be elided. */
+	readonly version: number;
 	readonly status: NodeStatus;
 	readonly throughput: number;
 }
@@ -48,12 +64,13 @@ export class DynamicsStore {
 	/** Records per second. */
 	throughput: Float32Array;
 
-	#cells: (NodeCell | undefined)[];
+	#cells: NodeCell[];
 
 	constructor(count: number) {
 		this.status = new Uint8Array(count);
 		this.throughput = new Float32Array(count);
 		this.#cells = new Array(count);
+		for (let i = 0; i < count; i++) this.#cells[i] = new NodeCell();
 	}
 
 	static from(dynamics: readonly NodeDynamics[]): DynamicsStore {
@@ -86,7 +103,12 @@ export class DynamicsStore {
 
 		this.status = status;
 		this.throughput = throughput;
+
+		// Append-only indices, so existing cells keep their meaning and only the
+		// new tail needs filling.
+		const had = this.#cells.length;
 		this.#cells.length = count;
+		for (let i = had; i < count; i++) this.#cells[i] = new NodeCell();
 	}
 
 	/**
@@ -94,16 +116,12 @@ export class DynamicsStore {
 	 * nothing else — which is the entire point of the class.
 	 */
 	view(index: number): LiveDynamics {
-		let cell = this.#cells[index];
-		if (!cell) {
-			cell = new NodeCell();
-			this.#cells[index] = cell;
-		}
 		// Reading the version is what registers the dependency. The value is
-		// meaningless; only the fact that it changed matters.
-		void cell.version;
-
+		// meaningless on its own; only the fact that it changed matters. It is
+		// returned rather than discarded so that nothing — a minifier, a future
+		// refactor — can decide the read was pointless and remove it.
 		return {
+			version: this.#cells[index].version,
 			status: NODE_STATUSES[this.status[index]],
 			throughput: this.throughput[index]
 		};
@@ -116,21 +134,13 @@ export class DynamicsStore {
 	}
 
 	/**
-	 * Notifies whatever is rendering this node, if anything is.
+	 * Notifies whatever is rendering this node.
 	 *
-	 * Nodes that have never been rendered have no cell, so this is a single
-	 * array read and a branch — which is what makes 200 updates a second across
+	 * One signal write. A node nothing is rendering has no subscribers, so the
+	 * write propagates nowhere — which is what makes 200 updates a second across
 	 * a 10,000-node graph cost almost nothing while 81 of them are on screen.
 	 */
 	notify(index: number): void {
-		const cell = this.#cells[index];
-		if (cell) cell.version++;
-	}
-
-	/** How many nodes have ever been rendered. For the stats strip. */
-	get cellCount(): number {
-		let count = 0;
-		for (let i = 0; i < this.#cells.length; i++) if (this.#cells[i]) count++;
-		return count;
+		this.#cells[index].version++;
 	}
 }

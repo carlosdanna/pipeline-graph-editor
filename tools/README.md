@@ -1,29 +1,43 @@
-# Verification harnesses
+# Benchmarks
 
-Headless checks for the parts of the app that are pure logic. They bundle with
-esbuild (so `$lib` resolves) and run in Node — no browser, no test runner. Phase
-9 turns these into proper Vitest suites; until then they are the evidence behind
-the numbers in [NOTES.md](../NOTES.md).
+Measurement scripts. They bundle with esbuild (so `$lib` resolves) and run in
+Node — no browser, no test runner. **They are the provenance of the numbers in
+[NOTES.md](../NOTES.md)**, and they exist so those numbers can be reproduced
+rather than taken on trust.
 
 ```bash
-npm run verify              # all three
-npm run verify:interact     # quadtree and bezier, vs brute force
-npm run verify:gestures     # the pointer gesture state machine
-npm run verify:draw         # what selection costs the draw loop
+npm run bench              # all of them
+npm run bench:interact     # quadtree and bezier picking
+npm run bench:gestures     # the pointer gesture state machine
+npm run bench:stream       # the streaming batcher
+npm run bench:table        # the virtual window
+npm run bench:a11y         # keyboard navigation and the accessible tree
+npm run bench:draw         # what culling and semantic zoom buy, per frame
 ```
 
-`verify-interact` and `verify-gestures` exit non-zero on failure.
-`verify-draw` only reports numbers.
+## Why these still assert, now that there are real tests
 
-Two shims make this possible, and both are worth knowing about:
+Correctness lives in the Vitest suites next to the source (`npm test`) — that is
+the gate, and it is what CI should fail on. These scripts overlap with it
+deliberately, because **a benchmark that measures broken code reports a
+meaningless number**, usually a flatteringly fast one. Each script checks the
+thing it is about before timing it, and exits non-zero if the check fails.
 
-- **`$state` is defined as the identity function** via an esbuild banner, so
-  `selection.svelte.ts` runs as a plain class. Its reactivity is not what is
-  under test; its set arithmetic is.
-- **`Path2D` is stubbed** in `verify-draw`, along with a proxy standing in for
-  `CanvasRenderingContext2D` that counts draw calls. That measures our
-  JavaScript only — rasterisation is the browser's and is far larger.
+So the division is: Vitest answers *is it right*, in a form that fails a build.
+These answer *how fast, and how does that change*, in a form you can read.
 
-The gesture harness can drive the real `InteractionController` because gesture
-meaning was deliberately kept out of `HybridRenderer`: there is no DOM in the
-path. See the note at the top of `src/lib/interact/controller.ts`.
+## Two shims, both worth knowing about
+
+- **`$state` is the identity function**, injected by an esbuild banner, so
+  `.svelte.ts` modules run as plain classes. The Vitest suites do *not* need
+  this — they compile through the Svelte plugin and exercise real signals — and
+  the difference matters: a bug where reactivity silently failed to register
+  would be invisible here and is caught there.
+- **`requestAnimationFrame` is a hand-stepped queue** in the streaming script.
+  "Batched into one frame-sized flush" is a claim about frame boundaries, and
+  in a browser you cannot place them.
+
+`bench-draw` additionally stubs `Path2D` and `CanvasRenderingContext2D` with a
+call-counting proxy. That measures our JavaScript only — rasterisation is the
+browser's and is far larger — so its numbers are a floor and a ratio, never a
+frame time. Real frame times come from the Playwright suite in `e2e/`.

@@ -10,12 +10,14 @@ SvelteKit (SPA, `adapter-static`, `ssr = false`) + Svelte 5 runes + TypeScript s
 npm run dev      # dev server
 npm run build    # static SPA into build/
 npm run check    # svelte-check + tsc
-npm run verify   # headless logic checks, see tools/
+npm test         # Vitest: pure logic in Node, components in jsdom
+npm run test:e2e # Playwright against the production build
+npm run bench    # measurement scripts behind the numbers in NOTES.md
 ```
 
 Decisions and measurements are logged per phase in [NOTES.md](./NOTES.md).
 
-## Current state: phase 8 — accessibility and keyboard
+## Current state: phase 9 — tests
 
 Fixture generator producing DAG-shaped pipelines at 50 / 500 / 2,000 / 10,000
 nodes, a structural validator, ELK layout in a dedicated Web Worker with stable
@@ -69,3 +71,12 @@ right follow the flow, up and down walk the layer), Enter selects, Escape
 clears, `+`/`-` zoom and `0` fits. The table has its own row navigation, sharing
 one focused node with the graph. Arrow navigation reaches 100% of stages at
 every fixture size and retraces exactly.
+
+Tested with Vitest (189 tests — pure logic in Node, components in jsdom) and
+Playwright (22 tests against the production build, including a frame-budget
+assertion at 2,000 and 10,000 nodes). `tools/` holds the benchmark scripts
+behind the numbers in NOTES.md.
+
+**Known limitation:** ELK cannot lay out the 10,000-node fixture in a browser —
+it overflows the worker's stack. That fixture falls back to the placeholder
+layered layout, which everything else works on normally. See NOTES.md, phase 9.

@@ -54,6 +54,27 @@
 	const described = $derived(tree.nodes.length);
 
 	/**
+	 * The options to render, with their selection state.
+	 *
+	 * Selection has to come through here rather than being read inline, because
+	 * `selection.nodeFlags` is a plain `Uint8Array` — deliberately, so the canvas
+	 * can read it every frame without a proxy — and a plain array cannot be
+	 * observed. `selection.version` is the signal that it changed.
+	 *
+	 * The *labels* are deliberately not in here. `describeNode` is called inline
+	 * in the `{#each}` body so that each option's text is its own effect,
+	 * depending on that node's cell alone; folding it into this list would mean
+	 * one node's status change re-describing all 150.
+	 */
+	const options = $derived.by(() => {
+		void selection.version;
+		return tree.nodes.map((index) => ({
+			index,
+			selected: selection.nodeFlags[index] === 1
+		}));
+	});
+
+	/**
 	 * Roving tabindex: exactly one element in the list is in the tab order.
 	 *
 	 * When nothing is focused that is the first described node, so Tab always
@@ -103,14 +124,14 @@
 		aria-label="Pipeline stages, {described.toLocaleString()} of {visible.visibleCount.toLocaleString()} on screen described, {graph.nodes.length.toLocaleString()} in total"
 		aria-live="off"
 	>
-		{#each tree.nodes as nodeIndex (nodeIndex)}
+		{#each options as option (option.index)}
 			<div
 				role="option"
-				data-node={nodeIndex}
-				tabindex={nodeIndex === tabbableNode ? 0 : -1}
-				aria-selected={selection.nodeFlags[nodeIndex] === 1}
+				data-node={option.index}
+				tabindex={option.index === tabbableNode ? 0 : -1}
+				aria-selected={option.selected}
 			>
-				{describeNode(graph, dynamics, nodeIndex)}
+				{describeNode(graph, dynamics, option.index)}
 			</div>
 		{/each}
 	</div>
