@@ -1,0 +1,24 @@
+{
+	"extends": "./.svelte-kit/tsconfig.json",
+	"compilerOptions": {
+		"rewriteRelativeImportExtensions": true,
+		"allowJs": true,
+		"checkJs": true,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"sourceMap": true,
+		"strict": true,
+		"moduleResolution": "bundler",
+
+		// Beyond `strict`. Deliberately NOT enabling `noUncheckedIndexedAccess`:
+		// this codebase indexes into parallel arrays in hot loops, and the resulting
+		// `T | undefined` noise would bury the logic it is meant to protect.
+		// See NOTES.md, phase 1.
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noImplicitReturns": true,
+		"noImplicitOverride": true
+	}
+}
