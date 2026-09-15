@@ -1,6 +1,5 @@
-import type { GraphIndex } from '$lib/graph/indexing';
 import type { PositionStore } from '$lib/graph/positions';
-import type { PipelineGraph } from '$lib/graph/types';
+import type { EdgeAnchors } from '$lib/render/edge-anchors';
 import { createEdgeGeometry, writeEdgeGeometry } from '$lib/render/edge-geometry';
 import { distanceSqToCubic } from './bezier';
 import type { NodeQuadtree } from './quadtree';
@@ -37,8 +36,7 @@ const geometry = createEdgeGeometry();
 
 export function hitTest(
 	tree: NodeQuadtree,
-	graph: PipelineGraph,
-	index: GraphIndex,
+	anchors: EdgeAnchors,
 	positions: PositionStore,
 	graphX: number,
 	graphY: number,
@@ -47,7 +45,7 @@ export function hitTest(
 	const node = tree.findNode(graphX, graphY);
 	if (node >= 0) return { node, edge: -1 };
 
-	const edge = hitTestEdge(graph, index, positions, graphX, graphY, zoom);
+	const edge = hitTestEdge(anchors, positions, graphX, graphY, zoom);
 	return edge >= 0 ? { node: -1, edge } : MISS;
 }
 
@@ -60,11 +58,12 @@ export function hitTest(
  * one node invalidates every edge touching it), and the scan is cheap enough
  * that it never happens in a hot path — it runs once per click, and only after
  * the quadtree has already ruled out a node. The control-hull box test inside
- * `distanceSqToCubic` rejects almost everything before any real arithmetic.
+ * `distanceSqToCubic` rejects almost everything before any real arithmetic,
+ * and since phase 5 the endpoints come from flat arrays rather than map
+ * lookups, so a rejected edge costs a handful of array reads.
  */
 export function hitTestEdge(
-	graph: PipelineGraph,
-	index: GraphIndex,
+	anchors: EdgeAnchors,
 	positions: PositionStore,
 	graphX: number,
 	graphY: number,
@@ -77,8 +76,8 @@ export function hitTestEdge(
 	let best = -1;
 	let bestSq = toleranceSq;
 
-	for (let e = 0; e < graph.edges.length; e++) {
-		if (!writeEdgeGeometry(geometry, graph, index, positions, e)) continue;
+	for (let e = 0; e < anchors.source.length; e++) {
+		if (!writeEdgeGeometry(geometry, anchors, positions, e)) continue;
 		const d = distanceSqToCubic(graphX, graphY, geometry, tolerance);
 		if (d < bestSq) {
 			bestSq = d;
@@ -90,25 +89,20 @@ export function hitTestEdge(
 }
 
 /**
- * Edges with both endpoints inside `nodes`.
+ * Edges with both endpoints inside `nodeFlags`.
  *
  * A marquee selects edges implicitly rather than by testing the curve against
  * the rectangle: an edge is part of what you dragged a box around only if both
  * of its ends are. Testing the curve would catch edges that merely pass
  * through, which is almost never what someone means, and would cost a
- * curve/rect intersection per edge instead of two set lookups.
+ * curve/rect intersection per edge instead of two array reads.
  */
-export function edgesWithin(
-	graph: PipelineGraph,
-	index: GraphIndex,
-	nodeFlags: Uint8Array,
-	out: number[]
-): number[] {
-	for (let e = 0; e < graph.edges.length; e++) {
-		const edge = graph.edges[e];
-		const from = index.nodeIndexById.get(edge.source);
-		const to = index.nodeIndexById.get(edge.target);
-		if (from === undefined || to === undefined) continue;
+export function edgesWithin(anchors: EdgeAnchors, nodeFlags: Uint8Array, out: number[]): number[] {
+	const { source, target } = anchors;
+	for (let e = 0; e < source.length; e++) {
+		const from = source[e];
+		const to = target[e];
+		if (from < 0 || to < 0) continue;
 		if (nodeFlags[from] === 1 && nodeFlags[to] === 1) out.push(e);
 	}
 	return out;

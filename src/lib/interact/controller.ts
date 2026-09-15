@@ -1,6 +1,6 @@
-import type { GraphIndex } from '$lib/graph/indexing';
 import type { PositionStore } from '$lib/graph/positions';
-import type { PipelineGraph, Rect } from '$lib/graph/types';
+import type { Rect } from '$lib/graph/types';
+import type { EdgeAnchors } from '$lib/render/edge-anchors';
 import type { PointerInput, InputTarget } from '$lib/render/hybrid-renderer';
 import type { Viewport } from '$lib/render/viewport';
 import { edgesWithin, hitTest } from './hit-test';
@@ -36,9 +36,9 @@ import type { SelectionStore } from './selection.svelte';
 const DRAG_THRESHOLD_PX = 3;
 
 export interface InteractionScene {
-	readonly graph: PipelineGraph;
-	readonly index: GraphIndex;
 	readonly positions: PositionStore;
+	/** Flat edge endpoints — the same arrays the renderer draws from. */
+	readonly anchors: EdgeAnchors;
 	readonly tree: NodeQuadtree;
 }
 
@@ -140,8 +140,7 @@ export class InteractionController implements InputTarget {
 
 		const hit = hitTest(
 			scene.tree,
-			scene.graph,
-			scene.index,
+			scene.anchors,
 			scene.positions,
 			this.#startGraphX,
 			this.#startGraphY,
@@ -343,7 +342,7 @@ export class InteractionController implements InputTarget {
 		// Edges are selected implicitly, from the node flags that call just
 		// committed, so an edge counts only when the box holds both of its ends.
 		this.#marqueeEdges.length = 0;
-		edgesWithin(scene.graph, scene.index, selection.nodeFlags, this.#marqueeEdges);
+		edgesWithin(scene.anchors, selection.nodeFlags, this.#marqueeEdges);
 		selection.setEdges(this.#marqueeEdges);
 	}
 }

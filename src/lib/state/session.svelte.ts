@@ -26,9 +26,12 @@ import {
 import { fullLayoutJob, regionLayoutJob } from '$lib/layout/jobs';
 import { layoutLayered } from '$lib/layout/layered';
 import { DEFAULT_PRESET, INCREMENTAL_OPTIONS, LAYOUT_PRESETS } from '$lib/layout/options';
+import { buildEdgeAnchors, type EdgeAnchors } from '$lib/render/edge-anchors';
+import { buildEdgeBuckets, type EdgeBuckets } from '$lib/render/edge-buckets';
 import { HybridRenderer } from '$lib/render/hybrid-renderer';
 import { DOM_NODE_LIMIT } from '$lib/render/limits';
 import { PerfMonitor } from '$lib/render/perf.svelte';
+import { VisibleNodes } from '$lib/render/visible.svelte';
 import { Viewport } from '$lib/render/viewport';
 
 /**
@@ -83,6 +86,14 @@ interface FixtureState {
 	readonly index: GraphIndex;
 	readonly validation: ValidationResult;
 	readonly positions: PositionStore;
+	/**
+	 * Render caches derived from structure. Owned here rather than inside the
+	 * component so the renderer and the hit-tester read the same arrays — and
+	 * so they are rebuilt exactly when structure changes, which is the only
+	 * time they can go stale.
+	 */
+	readonly anchors: EdgeAnchors;
+	readonly buckets: EdgeBuckets;
 	readonly generationMs: number;
 	readonly placeholderMs: number;
 }
@@ -102,6 +113,8 @@ function buildFixtureState(size: FixtureSize): FixtureState {
 		index,
 		validation: validateGraph(fixture.graph, index),
 		positions: placeholder.positions,
+		anchors: buildEdgeAnchors(fixture.graph, index),
+		buckets: buildEdgeBuckets(fixture.graph),
 		generationMs: fixture.generationMs,
 		placeholderMs: placeholder.durationMs
 	};
@@ -125,7 +138,9 @@ export class GraphSession implements InteractionHost {
 	 */
 	readonly viewport = new Viewport();
 	readonly perf = new PerfMonitor();
-	readonly renderer = new HybridRenderer(this.viewport, this.perf);
+	/** Which nodes the DOM layer should render. Written by the frame loop. */
+	readonly visibleNodes = new VisibleNodes();
+	readonly renderer = new HybridRenderer(this.viewport, this.perf, this.visibleNodes);
 
 	/**
 	 * Selection is reactive only in its summary — the flag arrays behind it are
@@ -139,6 +154,15 @@ export class GraphSession implements InteractionHost {
 
 	/** Build time of the current spatial index, for the stats strip. */
 	treeBuildMs = $state<number | null>(null);
+
+	/**
+	 * Both default on. They exist so the phase 5 numbers can be compared against
+	 * the phase 4 ones live in the HUD, which is what the phase asked for —
+	 * turning culling off restores exactly the old draw loop, because "off" is
+	 * an unbounded view rectangle rather than a second code path.
+	 */
+	cullingEnabled = $state(true);
+	semanticZoomEnabled = $state(true);
 
 	#client = new LayoutClient();
 	#animator = new PositionAnimator();
@@ -253,6 +277,8 @@ export class GraphSession implements InteractionHost {
 			dynamics: mutation.dynamics,
 			index,
 			positions,
+			anchors: buildEdgeAnchors(mutation.graph, index),
+			buckets: buildEdgeBuckets(mutation.graph),
 			validation: validateGraph(mutation.graph, index)
 		};
 		this.fixture = next;
@@ -338,16 +364,21 @@ export class GraphSession implements InteractionHost {
 	scene(): InteractionScene | null {
 		if (!this.#tree) return null;
 		const state = this.fixture;
-		return {
-			graph: state.graph,
-			index: state.index,
-			positions: state.positions,
-			tree: this.#tree
-		};
+		return { positions: state.positions, anchors: state.anchors, tree: this.#tree };
 	}
 
 	schedule(): void {
 		this.renderer.schedule();
+	}
+
+	setCulling(enabled: boolean): void {
+		this.cullingEnabled = enabled;
+		this.renderer.setCulling(enabled);
+	}
+
+	setSemanticZoom(enabled: boolean): void {
+		this.semanticZoomEnabled = enabled;
+		this.renderer.setSemanticZoom(enabled);
 	}
 
 	/**

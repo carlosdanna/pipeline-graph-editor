@@ -12,6 +12,8 @@ import { NodeQuadtree } from '$lib/interact/quadtree';
 import { distanceSqToCubic, pointSegmentDistanceSq, segmentsFor } from '$lib/interact/bezier';
 import { hitTest, hitTestEdge, edgesWithin, EDGE_PICK_TOLERANCE_PX } from '$lib/interact/hit-test';
 import { createEdgeGeometry, writeEdgeGeometry } from '$lib/render/edge-geometry';
+import { buildEdgeAnchors } from '$lib/render/edge-anchors';
+import { cullNodes, edgeVisible, viewRectFor, type ViewRect } from '$lib/render/cull';
 import type { PipelineGraph, Rect } from '$lib/graph/types';
 
 let failures = 0;
@@ -89,7 +91,13 @@ const built = FIXTURE_SIZES.map((size) => {
 	const fixture = generateFixture(size);
 	const index = buildGraphIndex(fixture.graph);
 	const layout = layoutLayered(fixture.graph, index);
-	return { size, graph: fixture.graph, index, positions: layout.positions };
+	return {
+		size,
+		graph: fixture.graph,
+		index,
+		positions: layout.positions,
+		anchors: buildEdgeAnchors(fixture.graph, index)
+	};
 });
 
 for (const f of built) {
@@ -177,7 +185,7 @@ console.log('\n=== bezier distance vs 4096-segment reference ===\n');
 		let segMax = 0;
 
 		for (let e = 0; e < Math.min(400, f.graph.edges.length); e++) {
-			if (!writeEdgeGeometry(g, f.graph, f.index, f.positions, e)) continue;
+			if (!writeEdgeGeometry(g, f.anchors, f.positions, e)) continue;
 			segSum += segmentsFor(g, tolerance * 0.25);
 			segMax = Math.max(segMax, segmentsFor(g, tolerance * 0.25));
 			for (let s = 0; s < 8; s++) {
@@ -202,7 +210,7 @@ console.log('\n=== bezier distance vs 4096-segment reference ===\n');
 
 	// A point exactly on the curve must read as on the curve, at the tightest
 	// tolerance we ever use.
-	writeEdgeGeometry(g, f.graph, f.index, f.positions, 0);
+	writeEdgeGeometry(g, f.anchors, f.positions, 0);
 	let worstOn = 0;
 	for (let s = 0; s <= 20; s++) {
 		const [x, y] = cubicAt(g, s / 20);
@@ -213,7 +221,7 @@ console.log('\n=== bezier distance vs 4096-segment reference ===\n');
 	// The control-hull early out must never reject a point that is genuinely close.
 	let falseRejects = 0;
 	for (let e = 0; e < Math.min(400, f.graph.edges.length); e++) {
-		if (!writeEdgeGeometry(g, f.graph, f.index, f.positions, e)) continue;
+		if (!writeEdgeGeometry(g, f.anchors, f.positions, e)) continue;
 		const [x, y] = cubicAt(g, 0.5);
 		if (!Number.isFinite(distanceSqToCubic(x, y, g, 10))) falseRejects++;
 	}
@@ -223,14 +231,14 @@ console.log('\n=== bezier distance vs 4096-segment reference ===\n');
 	let steepest = 0;
 	let steepestSegs = 0;
 	for (let e = 0; e < f.graph.edges.length; e++) {
-		if (!writeEdgeGeometry(g, f.graph, f.index, f.positions, e)) continue;
+		if (!writeEdgeGeometry(g, f.anchors, f.positions, e)) continue;
 		const n = segmentsFor(g, 2.5);
 		if (n > steepestSegs) {
 			steepestSegs = n;
 			steepest = e;
 		}
 	}
-	writeEdgeGeometry(g, f.graph, f.index, f.positions, steepest);
+	writeEdgeGeometry(g, f.anchors, f.positions, steepest);
 	const [mx, my] = cubicAt(g, 0.5);
 	const gotSteep = Math.sqrt(distanceSqToCubic(mx, my, g, 10));
 	check(
@@ -250,18 +258,18 @@ for (const f of built) {
 
 	for (let s = 0; s < 300; s++) {
 		const e = Math.floor(random() * f.graph.edges.length);
-		if (!writeEdgeGeometry(g, f.graph, f.index, f.positions, e)) continue;
+		if (!writeEdgeGeometry(g, f.anchors, f.positions, e)) continue;
 		const [x, y] = cubicAt(g, 0.5);
 		// Skip midpoints that land under a node — nodes win, by design.
 		if (tree.findNode(x, y) >= 0) continue;
 		attempted++;
-		const picked = hitTestEdge(f.graph, f.index, f.positions, x, y, 1);
+		const picked = hitTestEdge(f.anchors, f.positions, x, y, 1);
 		// Another edge may genuinely be closer at that point; accept it only if
 		// it really is at least as close.
 		if (picked === e) recovered++;
 		else if (picked >= 0) {
 			const other = createEdgeGeometry();
-			writeEdgeGeometry(other, f.graph, f.index, f.positions, picked);
+			writeEdgeGeometry(other, f.anchors, f.positions, picked);
 			if (distanceSqToCubic(x, y, other, 1e6) <= 1e-6) recovered++;
 		}
 	}
@@ -272,7 +280,7 @@ for (const f of built) {
 	);
 
 	// A point far from everything must miss.
-	const miss = hitTestEdge(f.graph, f.index, f.positions, -1e6, -1e6, 1);
+	const miss = hitTestEdge(f.anchors, f.positions, -1e6, -1e6, 1);
 	check(`far point misses n=${String(f.size).padStart(5)}`, miss === -1, `got ${miss}`);
 }
 
@@ -286,7 +294,7 @@ console.log('\n=== nodes win over edges ===\n');
 		const i = Math.floor(random() * f.graph.nodes.length);
 		const px = f.positions.x[i] + f.graph.nodes[i].width * random();
 		const py = f.positions.y[i] + f.graph.nodes[i].height * random();
-		const hit = hitTest(tree, f.graph, f.index, f.positions, px, py, 1);
+		const hit = hitTest(tree, f.anchors, f.positions, px, py, 1);
 		if (hit.node < 0 || hit.edge !== -1) violations++;
 	}
 	check('a point inside a node never returns an edge', violations === 0, `${violations} violations`);
@@ -300,7 +308,7 @@ console.log('\n=== marquee: edges need both ends inside ===\n');
 	const nodes = tree.queryRect({ x: 0, y: 0, width: 3000, height: 3000 }, []);
 	for (const n of nodes) flags[n] = 1;
 
-	const edges = edgesWithin(f.graph, f.index, flags, []);
+	const edges = edgesWithin(f.anchors, flags, []);
 	let bad = 0;
 	for (const e of edges) {
 		const edge = f.graph.edges[e];
@@ -324,6 +332,114 @@ console.log('\n=== marquee: edges need both ends inside ===\n');
 		if (flags[from] === 1 && flags[to] === 1 && !chosen.has(e)) missed++;
 	}
 	check('no qualifying edge is missed', missed === 0, `${missed} missed`);
+}
+
+console.log('\n=== culling correctness ===\n');
+for (const f of built) {
+	const random = rng(0x5150 + f.size);
+	const buffer = new Int32Array(f.graph.nodes.length);
+
+	// An unbounded view must keep everything — this is the "culling off" path
+	// the HUD comparison relies on being identical to no culling at all.
+	const all = cullNodes(f.graph, f.positions, {
+		left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity
+	}, buffer);
+	check(`unbounded view keeps every node n=${String(f.size).padStart(5)}`,
+		all === f.graph.nodes.length, `${all}/${f.graph.nodes.length}`);
+
+	/**
+	 * A viewport centred on a randomly chosen node at a random zoom. Centring on
+	 * real nodes matters: viewports sampled from an arbitrary coordinate range
+	 * mostly land off the graph, and a cull test where nothing is ever kept
+	 * passes without testing anything.
+	 */
+	const viewportOnNode = (): { x: number; y: number; k: number } => {
+		const i = Math.floor(random() * f.graph.nodes.length);
+		const k = 0.05 + random() * 1.5;
+		return {
+			k,
+			x: 1440 / 2 - f.positions.x[i] * k,
+			y: 820 / 2 - f.positions.y[i] * k
+		};
+	};
+
+	// Random viewports, against brute force.
+	let nodeMismatches = 0;
+	let totalKept = 0;
+	for (let s = 0; s < 100; s++) {
+		const viewport = viewportOnNode();
+		const view = viewRectFor(viewport, 1440, 820);
+		const count = cullNodes(f.graph, f.positions, view, buffer);
+		totalKept += count;
+
+		const expected: number[] = [];
+		for (let i = 0; i < f.graph.nodes.length; i++) {
+			const n = f.graph.nodes[i];
+			const x = f.positions.x[i];
+			const y = f.positions.y[i];
+			if (x > view.right || x + n.width < view.left) continue;
+			if (y > view.bottom || y + n.height < view.top) continue;
+			expected.push(i);
+		}
+		if (count !== expected.length) { nodeMismatches++; continue; }
+		for (let j = 0; j < count; j++) if (buffer[j] !== expected[j]) { nodeMismatches++; break; }
+	}
+	check(`cullNodes n=${String(f.size).padStart(5)}`, nodeMismatches === 0 && totalKept > 0,
+		`100 viewports, ${(totalKept / 100).toFixed(1)} kept on average`);
+
+	// Edge culling must never reject an edge that is actually on screen, in
+	// EITHER geometry. The bezier tier samples the real curve; the dot tier
+	// samples the centre-to-centre segment it actually draws.
+	const g = createEdgeGeometry();
+	for (const straight of [false, true]) {
+		let falseRejects = 0;
+		let tested = 0;
+		let accepted = 0;
+
+		for (let s = 0; s < 40; s++) {
+			const view = viewRectFor(viewportOnNode(), 1440, 820);
+			for (let e = 0; e < f.graph.edges.length; e += 7) {
+				const from = f.anchors.source[e];
+				const to = f.anchors.target[e];
+				if (from < 0 || to < 0) continue;
+				tested++;
+
+				const visible = edgeVisible(f.anchors, f.positions, e, view, straight);
+				if (visible) { accepted++; continue; }
+
+				// Rejected — prove no part of what would be drawn was inside.
+				let inside = false;
+				if (straight) {
+					const ax = f.positions.x[from] + f.anchors.sourceCentreX[e];
+					const ay = f.positions.y[from] + f.anchors.sourceCentreY[e];
+					const bx = f.positions.x[to] + f.anchors.targetCentreX[e];
+					const by = f.positions.y[to] + f.anchors.targetCentreY[e];
+					for (let t = 0; t <= 32 && !inside; t++) {
+						const u = t / 32;
+						const x = ax + (bx - ax) * u;
+						const y = ay + (by - ay) * u;
+						inside = x >= view.left && x <= view.right && y >= view.top && y <= view.bottom;
+					}
+				} else {
+					writeEdgeGeometry(g, f.anchors, f.positions, e);
+					for (let t = 0; t <= 32 && !inside; t++) {
+						const [x, y] = cubicAt(g, t / 32);
+						inside = x >= view.left && x <= view.right && y >= view.top && y <= view.bottom;
+					}
+				}
+				if (inside) falseRejects++;
+			}
+		}
+
+		// Both bounds matter: zero false rejects proves correctness, and a
+		// partial accept rate proves the rejecting path was exercised at all.
+		check(
+			`edgeVisible ${(straight ? 'straight' : 'bezier').padEnd(8)} n=${String(f.size).padStart(5)}`,
+			falseRejects === 0 && accepted > 0 && accepted < tested,
+			`${tested} tests, ${accepted} accepted, ${tested - accepted} rejected, ` +
+				`${falseRejects} false rejects`
+		);
+	}
 }
 
 console.log('\n=== cost ===\n');
@@ -366,7 +482,7 @@ for (const f of built) {
 	const edgeTimes: number[] = [];
 	for (let r = 0; r < 5; r++) {
 		const t0 = performance.now();
-		for (const [x, y] of emptyPts) hitTestEdge(f.graph, f.index, f.positions, x, y, 1);
+		for (const [x, y] of emptyPts) hitTestEdge(f.anchors, f.positions, x, y, 1);
 		edgeTimes.push((performance.now() - t0) / emptyPts.length);
 	}
 
@@ -396,7 +512,7 @@ for (const f of built) {
 		flags.fill(0);
 		for (const n of nodeOut) flags[n] = 1;
 		edgeOut.length = 0;
-		edgesWithin(f.graph, f.index, flags, edgeOut);
+		edgesWithin(f.anchors, flags, edgeOut);
 		marqueeTimes.push(performance.now() - t0);
 		caught = nodeOut.length;
 	}

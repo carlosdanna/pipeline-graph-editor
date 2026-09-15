@@ -15,7 +15,7 @@ npm run verify   # headless logic checks, see tools/
 
 Decisions and measurements are logged per phase in [NOTES.md](./NOTES.md).
 
-## Current state: phase 4 — interaction
+## Current state: phase 5 — culling and semantic zoom
 
 Fixture generator producing DAG-shaped pipelines at 50 / 500 / 2,000 / 10,000
 nodes, a structural validator, ELK layout in a dedicated Web Worker with stable
@@ -38,6 +38,13 @@ shift-drag marquee, and node dragging with edges following live.
 | drag a node | move the selection |
 | middle-drag | pan, always |
 
-Nodes are drawn up to 2,000; above that the canvas still renders edges, ports
-and selection, and every gesture keeps working — nothing goes through a node
-element. No culling and no semantic zoom yet; that is phase 5.
+Everything off screen is culled, and detail is a function of zoom: below 0.5
+labels and ports are dropped for plain boxes, below 0.25 nodes become dots and
+edges straight lines. Nodes leave the DOM for the canvas above 2,000 of them or
+below the full detail tier — every gesture keeps working either way, because
+nothing goes through a node element.
+
+Zoomed in at 10,000 nodes this is a 10x reduction in per-frame JavaScript
+(1.98 ms to 0.20 ms); zoomed out it is 2.1x, all of it semantic zoom. The `cull`
+and `semantic zoom` checkboxes turn each off so the HUD shows the difference
+live.

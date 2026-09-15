@@ -1,88 +1,110 @@
 <script lang="ts">
-	import type { GraphIndex } from '$lib/graph/indexing';
 	import type { PositionStore } from '$lib/graph/positions';
 	import type { NodeDynamics, PipelineGraph } from '$lib/graph/types';
 	import type { SelectionStore } from '$lib/interact/selection.svelte';
-	import { buildEdgeBuckets } from '$lib/render/edge-buckets';
+	import type { EdgeAnchors } from '$lib/render/edge-anchors';
+	import type { EdgeBuckets } from '$lib/render/edge-buckets';
 	import type { HybridRenderer } from '$lib/render/hybrid-renderer';
-	import { DOM_NODE_LIMIT } from '$lib/render/limits';
 	import { KIND_COLOR, STATUS_COLOR, formatThroughput, truncate } from '$lib/render/theme';
+	import type { VisibleNodes } from '$lib/render/visible.svelte';
 
 	/**
-	 * The hybrid renderer's markup: a canvas for grid and edges, and a
-	 * CSS-transformed layer of DOM nodes above it.
+	 * The hybrid renderer's markup: a canvas for grid, edges, ports and
+	 * selection, and a CSS-transformed layer of DOM nodes above it.
 	 *
 	 * Both are moved by one transform, applied once per frame by HybridRenderer.
 	 * Nothing in this component repositions anything individually — the node
 	 * elements carry their graph-space offset and never learn about zoom.
+	 *
+	 * Since phase 5 the DOM layer renders only the nodes the renderer culled to,
+	 * and only while the renderer says the DOM owns nodes at all. Above the node
+	 * limit, or below the full detail tier, this layer renders nothing and the
+	 * canvas draws the bodies instead. Every gesture keeps working either way,
+	 * because nothing has ever gone through a node element.
 	 */
 	interface Props {
 		graph: PipelineGraph;
-		index: GraphIndex;
 		positions: PositionStore;
 		dynamics: readonly NodeDynamics[];
 		/**
+		 * Structural render caches, built by the session when the graph changes.
+		 * Passed in rather than derived here so the renderer and the hit-tester
+		 * read the same arrays.
+		 */
+		anchors: EdgeAnchors;
+		buckets: EdgeBuckets;
+		/**
 		 * Selection is passed through to the canvas, not used in this template.
 		 * Nothing here binds a `.selected` class: selection is drawn on the
-		 * canvas precisely so a marquee over 2,000 nodes costs no DOM work. See
-		 * selection.svelte.ts.
+		 * canvas precisely so a marquee over 2,000 nodes costs no DOM work.
 		 */
 		selection: SelectionStore;
+		/** Which nodes are on screen, published by the frame loop. */
+		visible: VisibleNodes;
 		/** Bumped when positions are written in place; see session.svelte.ts. */
 		geometryVersion: number;
 		renderer: HybridRenderer;
 	}
 
-	let { graph, index, positions, dynamics, selection, geometryVersion, renderer }: Props =
-		$props();
-
-	const buckets = $derived(buildEdgeBuckets(graph));
-	const nodesAreDom = $derived(graph.nodes.length <= DOM_NODE_LIMIT);
+	let {
+		graph,
+		positions,
+		dynamics,
+		anchors,
+		buckets,
+		selection,
+		visible,
+		geometryVersion,
+		renderer
+	}: Props = $props();
 
 	// Pushing reactive state into an imperative renderer is what $effect is for.
 	// The renderer decides when to draw; this only tells it what to draw.
 	$effect(() => {
 		void geometryVersion;
-		renderer.setScene({ graph, index, positions, buckets, selection });
+		renderer.setScene({ graph, dynamics, positions, buckets, anchors, selection });
 	});
 
-	// Rebuilt whenever positions move, which during a layout tween is every
-	// frame. At 2,000 nodes that is 2,000 strings per frame — the honest cost of
-	// keeping nodes in the DOM, and the reason for DOM_NODE_LIMIT.
-	const nodeOffsets = $derived.by(() => {
+	/**
+	 * The DOM nodes to render, rebuilt whenever positions move or the visible
+	 * set changes.
+	 *
+	 * In phase 3 this built a string for every node in the graph on every
+	 * animation frame — 2,000 template literals per frame at the DOM limit, and
+	 * the honest reason the limit existed. Culling reduces it to what is on
+	 * screen, which is a few dozen, so the same code is now roughly free.
+	 */
+	const domNodes = $derived.by(() => {
 		void geometryVersion;
-		if (!nodesAreDom) return [];
-		return graph.nodes.map((_, i) => `${positions.x[i]}px ${positions.y[i]}px`);
+		if (!visible.domNodes) return [];
+		return visible.indices.map((i) => ({
+			index: i,
+			node: graph.nodes[i],
+			offset: `${positions.x[i]}px ${positions.y[i]}px`,
+			status: dynamics[i].status,
+			throughput: dynamics[i].throughput
+		}));
 	});
 </script>
 
 <div class="surface" {@attach renderer.attachSurface}>
 	<canvas {@attach renderer.attachCanvas}></canvas>
 
-	{#if nodesAreDom}
-		<div class="node-layer" {@attach renderer.attachLayer}>
-			{#each graph.nodes as node, i (node.id)}
-				<div
-					class="node"
-					style:translate={nodeOffsets[i]}
-					style:width="{node.width}px"
-					style:height="{node.height}px"
-					style:--kind={KIND_COLOR[node.kind]}
-					style:--status={STATUS_COLOR[dynamics[i].status]}
-				>
-					<span class="label">{truncate(node.label, 17)}</span>
-					<span class="rate">{formatThroughput(dynamics[i].throughput)}</span>
-				</div>
-			{/each}
-		</div>
-	{:else}
-		<p class="overflow">
-			{graph.nodes.length.toLocaleString()} nodes exceeds the {DOM_NODE_LIMIT.toLocaleString()} DOM
-			limit — edges, ports and selection are still drawn, and pan, zoom, picking and dragging all
-			still work, because none of them go through a node element. Phase 5 draws nodes on the
-			canvas above this threshold.
-		</p>
-	{/if}
+	<div class="node-layer" {@attach renderer.attachLayer}>
+		{#each domNodes as entry (entry.node.id)}
+			<div
+				class="node"
+				style:translate={entry.offset}
+				style:width="{entry.node.width}px"
+				style:height="{entry.node.height}px"
+				style:--kind={KIND_COLOR[entry.node.kind]}
+				style:--status={STATUS_COLOR[entry.status]}
+			>
+				<span class="label">{truncate(entry.node.label, 17)}</span>
+				<span class="rate">{formatThroughput(entry.throughput)}</span>
+			</div>
+		{/each}
+	</div>
 </div>
 
 <style>
@@ -117,7 +139,7 @@
 		 * All interaction goes through the surface and the quadtree — never
 		 * through a node's own event target. That keeps the interaction model
 		 * identical whether nodes are DOM elements or pixels, which is what lets
-		 * phase 5 switch between them at runtime with no change to picking.
+		 * the renderer switch between them at runtime with no change to picking.
 		 */
 		pointer-events: none;
 		will-change: transform;
@@ -150,22 +172,5 @@
 		font-size: 9.5px;
 		color: var(--text-muted);
 		white-space: nowrap;
-	}
-
-	.overflow {
-		position: absolute;
-		top: 50%;
-		left: 50%;
-		max-width: 46ch;
-		margin: 0;
-		transform: translate(-50%, -50%);
-		padding: 12px 16px;
-		font-size: 11.5px;
-		line-height: 1.6;
-		color: var(--text-muted);
-		background: rgb(14 18 24 / 0.85);
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		pointer-events: none;
 	}
 </style>

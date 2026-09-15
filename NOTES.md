@@ -692,10 +692,10 @@ and left, shrink-deselects, and both-endpoints-inside for implied edges.
 
 ### Known limitations, carried forward
 
-- **Still not verified in a browser.** Same caveat as phases 2 and 3: typecheck,
-  production build, dev-server transform of every new module, and all the logic
-  above pass, but no frame has been seen. Phase 9's Playwright tests are where
-  this stops being true.
+- ~~**Still not verified in a browser.**~~ Resolved at the start of phase 5:
+  you confirmed phases 1-4 run correctly in a browser. Three phases of "verified
+  everywhere except the target environment" closed out with no further defects
+  beyond the elkjs one phase 3 already found.
 - The quadtree is stale during a layout tween (420 ms), so a click mid-animation
   can pick the wrong node. Rebuilding per frame costs more than the tween does.
 - `writeEdgeGeometry` does two `Map.get` calls per edge per frame — 29,478 at
@@ -709,3 +709,200 @@ and left, shrink-deselects, and both-endpoints-inside for implied edges.
   than in what the box caught.
 - No hover feedback and no cursor change over a node. Not asked for, and it
   would mean a hit test on every pointermove plus a redraw to show it.
+
+---
+
+## Phase 5 — culling and semantic zoom
+
+You confirmed phases 1-4 work in a browser before this phase started, which
+closes the caveat that had been carried since phase 2.
+
+### What landed
+
+```
+src/lib/render/edge-anchors.ts   per-edge endpoints, resolved once per graph
+src/lib/render/cull.ts           view rect, node culling, edge visibility
+src/lib/render/nodes.ts          canvas node rendering, all three detail tiers
+src/lib/render/limits.ts         zoom tiers and the cull margin
+src/lib/render/visible.svelte.ts the culled list, bridged into Svelte
+```
+
+`scene.ts` culls in every loop and switched to anchors. `hybrid-renderer.ts`
+decides the tier and the render mode once per frame. `hit-test.ts` and
+`edge-geometry.ts` lost their map lookups. `GraphCanvas.svelte` renders only
+the culled nodes. The HUD gained visible edges, the detail tier, and whether
+nodes are coming from the DOM or the canvas.
+
+### Decisions
+
+**Culling is a linear scan, not a quadtree query.** We already have a quadtree
+over exactly these bounds, and it would answer in O(log n + k) instead of O(n).
+It is still the wrong tool here, for two reasons. It is deliberately *stale*
+during a layout tween and during a drag — rebuilt only when geometry settles —
+so culling from it would make a dragged node vanish. And the constant dominates:
+10,000 Float32Array reads and four comparisons is about 10 µs, while the work
+culling removes is ~15,000 `bezierCurveTo` calls and ~25,000 port rects. The
+scan stays O(n) and the *work* becomes O(visible), which is the right way round,
+because n is bounded by the fixture and the per-object work is bounded by the
+screen.
+
+**Two independent roads lead to canvas nodes.** Nodes leave the DOM when there
+are more than 2,000 of them *or* when zoom drops below the full tier. The second
+is the one I did not anticipate needing: the DOM layer is not merely a
+small-graph path, it is the *zoomed-in* path. Both roads work without touching
+interaction, because nothing has ever gone through a node element.
+
+**"Culling off" is an unbounded view rectangle, not a second code path.** The
+two HUD checkboxes had to produce numbers comparable with phase 4's, and the
+only way to be sure of that is for the draw loops not to know which mode they
+are in. Off means `left: -Infinity`, and every loop runs exactly as it did.
+
+**Edge endpoints moved into flat arrays.** Phase 4's notes flagged
+`writeEdgeGeometry`'s two `Map.get` calls per edge per frame — 29,478 at 10k, in
+the main draw loop — as the obvious remaining win. Culling forced the issue,
+because a cull test can only be cheaper than drawing if the endpoint lookup is
+nearly free. Port offsets are structural (slot, port count and node height never
+change without the graph changing), so everything except the node's position
+resolves once per graph.
+
+**At the coarsest tier edges run centre to centre.** Not a performance decision
+— a correctness one, and a bug I nearly shipped. Below quarter zoom nodes are
+drawn as dots at their centre, but edges still terminated at ports on the node's
+left and right edges, so every line stopped half a node width short of the dot
+it was aiming at: about twenty screen pixels of line ending in empty space. The
+cull test takes a `straight` flag for the same reason — culling one geometry
+while drawing another is how edges flicker out at the viewport edge.
+
+### What surprised me
+
+**Culling does nothing at fit-to-screen, which is when there is most to draw.**
+Obvious in hindsight and slightly humbling: fit means everything is on screen,
+so the visible count is 10,000 / 10,000 and the cull test is pure overhead.
+
+| 10,000 nodes, fit (0.021x) | draw   |
+|----------------------------|--------|
+| culling off, semantic off  | 1.61 ms |
+| culling on, semantic off   | 1.62 ms |
+| culling on, semantic on    | 0.77 ms |
+
+Culling costs 0.01 ms and buys nothing. **Semantic zoom is the entire win in
+that case** — a 2.1x improvement, and it comes from not drawing things that were
+never legible. The two mechanisms turn out to cover disjoint situations: culling
+pays when you are zoomed in, semantic zoom pays when you are zoomed out, and
+there is no zoom at which both matter much. I had assumed they would compound.
+
+**Edge culling is far less selective than node culling.** At 10k, zoom 1.0:
+
+```
+nodes drawn      81 / 10,000    0.8%
+edges drawn   1,867 / 14,739   12.7%
+```
+
+A sixteen-fold difference. The cause is that a bezier's axis-aligned bounding
+box is a poor proxy for a diagonal curve — an edge running from far above-left
+to far below-right has a box covering the whole viewport while the curve only
+crosses one corner of it. Tightening this would mean a fattened segment/rect
+test per edge instead of four comparisons. Not worth it at 0.20 ms, but it is
+the reason the edge number never gets as good as the node number, and it would
+be the first thing to look at if edges ever dominated a frame again.
+
+**The anchors refactor helped picking more than drawing.** I did it for the draw
+loop and for culling. The larger effect was somewhere I was not optimising:
+
+| 10,000 nodes      | phase 4 | phase 5 |
+|-------------------|---------|---------|
+| edge pick (miss)  | 1.49 ms | 0.26 ms |
+| marquee frame     | 0.50 ms | 0.12 ms |
+
+5.7x and 4.2x. Edge picking scans every edge, so it was paying the same 29,478
+map lookups as the draw loop, once per click — and the marquee's implied-edge
+pass was paying it every frame of a drag. A single change to how endpoints are
+stored moved three unrelated call sites at once, which is the argument for
+having had exactly one definition of edge geometry.
+
+**Fit-to-screen lands in the dot tier at every fixture size**, including 50
+nodes. Fit zoom is 0.021x at 10k, 0.064x at 2,000 and 0.177x at 500, all below
+the 0.25 threshold the brief specified. So the default view on load is dots, at
+every size. That is what "below ~0.25, draw nodes as dots" means for graphs
+shaped like ours, and it is worth knowing before deciding the threshold is
+right — `ZOOM_DOT` in `limits.ts` is one constant if you want boxes on load.
+
+### Before and after
+
+Our JavaScript per frame, 1440x820 viewport, stub context — rasterisation is the
+browser's and is not included, so these are a floor and a ratio rather than
+frame times. "off/off" is exactly the phase 4 draw loop.
+
+**2,000 nodes, 2,944 edges** (fit = 0.064x)
+
+| zoom | cull | semantic | draw    | nodes drawn | edges drawn | tier   | via    |
+|------|------|----------|---------|-------------|-------------|--------|--------|
+| fit  | off  | off      | 0.34 ms | 2,000/2,000 | 2,944/2,944 | full   | dom    |
+| fit  | on   | on       | 0.17 ms | 2,000/2,000 | 2,944/2,944 | dot    | canvas |
+| 0.25 | off  | off      | 0.22 ms | 2,000/2,000 | 2,944/2,944 | full   | dom    |
+| 0.25 | on   | on       | 0.16 ms | 1,158/2,000 | 2,473/2,944 | simple | canvas |
+| 0.5  | off  | off      | 0.22 ms | 2,000/2,000 | 2,944/2,944 | full   | dom    |
+| 0.5  | on   | on       | 0.09 ms |   345/2,000 | 1,256/2,944 | full   | dom    |
+| 1.0  | off  | off      | 0.22 ms | 2,000/2,000 | 2,944/2,944 | full   | dom    |
+| 1.0  | on   | on       | 0.05 ms |    95/2,000 |   568/2,944 | full   | dom    |
+
+**10,000 nodes, 14,739 edges** (fit = 0.021x)
+
+| zoom | cull | semantic | draw    | nodes drawn   | edges drawn   | tier   | via    |
+|------|------|----------|---------|---------------|---------------|--------|--------|
+| fit  | off  | off      | 1.61 ms | 10,000/10,000 | 14,739/14,739 | full   | canvas |
+| fit  | on   | on       | 0.77 ms | 10,000/10,000 | 14,739/14,739 | dot    | canvas |
+| 0.25 | off  | off      | 1.62 ms | 10,000/10,000 | 14,739/14,739 | full   | canvas |
+| 0.25 | on   | on       | 0.48 ms |  1,249/10,000 |  6,948/14,739 | simple | canvas |
+| 0.5  | off  | off      | 1.63 ms | 10,000/10,000 | 14,739/14,739 | full   | canvas |
+| 0.5  | on   | on       | 0.31 ms |    316/10,000 |  3,563/14,739 | full   | canvas |
+| 1.0  | off  | off      | 1.98 ms | 10,000/10,000 | 14,739/14,739 | full   | canvas |
+| 1.0  | on   | on       | 0.20 ms |     81/10,000 |  1,867/14,739 | full   | canvas |
+
+Zoomed in at 10k: **1.98 ms to 0.20 ms, a 10x reduction.** Zoomed out: 2.1x,
+all of it semantic zoom. The 1.98 ms "off" row is higher than the 1.63 ms at 0.5
+because full-detail canvas nodes mean 10,000 `fillText` calls for labels that
+are mostly off screen.
+
+Phase 4 found that selecting everything cost +2.15 ms at 10k, because the
+selected-edge pass re-strokes every edge. Culling bounds it:
+
+| 10,000 nodes, everything selected, 1.0x | draw    |
+|-----------------------------------------|---------|
+| off / off                               | 2.89 ms |
+| on / on                                 | 0.49 ms |
+
+### Verified
+
+`npm run verify` — all checks pass at every fixture size:
+
+```
+unbounded view keeps every node          50 / 500 / 2,000 / 10,000
+cullNodes vs brute force                 100 viewports each, 0 mismatches
+edgeVisible bezier    n=10,000           84,240 tests, 72,532 rejected, 0 false rejects
+edgeVisible straight  n=10,000           84,240 tests, 70,349 rejected, 0 false rejects
+```
+
+The edge-culling test asserts in both directions — zero false rejects proves
+correctness, and a partial accept rate proves the rejecting path was exercised
+rather than the test being vacuous. The first version of that test sampled
+viewports from an arbitrary coordinate range, mostly missed the graph entirely,
+and reported "0 kept on average" while passing. Worth checking that a test can
+fail before trusting that it passed.
+
+### Known limitations, carried forward
+
+- Edge culling accepts ~16x more than node culling, for the AABB reason above.
+- The DOM node list crosses into Svelte's reactivity, so a node *entering* the
+  viewport appears one frame late. Position never lags — that still comes from
+  the shared transform in the rAF callback — and the 160px cull margin is many
+  frames of runway at any plausible pan speed. Worth knowing it is there.
+- Canvas-drawn nodes mean a status change repaints the whole canvas. Requirement
+  3 asks for a status change to repaint one node and never trigger a full canvas
+  redraw, which is satisfiable for DOM nodes and *not* for canvas ones without
+  dirty rectangles. Phase 6 has to decide what that requirement means above the
+  DOM limit; my current guess is per-frame batching plus the existing culling,
+  since only visible nodes are drawn at all.
+- Detail tiers are chosen from zoom alone. Density would be a better signal — a
+  sparse graph at 0.3x is perfectly readable as boxes — but zoom is the thing
+  the brief specified and the thing a user can predict.

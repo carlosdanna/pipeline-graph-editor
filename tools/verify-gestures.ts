@@ -15,6 +15,7 @@ import { layoutLayered } from '$lib/layout/layered';
 import { NodeQuadtree } from '$lib/interact/quadtree';
 import { SelectionStore } from '$lib/interact/selection.svelte';
 import { InteractionController, type InteractionScene } from '$lib/interact/controller';
+import { buildEdgeAnchors } from '$lib/render/edge-anchors';
 import { Viewport } from '$lib/render/viewport';
 import { createEdgeGeometry, writeEdgeGeometry } from '$lib/render/edge-geometry';
 import type { PointerInput } from '$lib/render/hybrid-renderer';
@@ -27,6 +28,7 @@ function check(label: string, ok: boolean, detail = ''): void {
 
 const fixture = generateFixture(500);
 const index = buildGraphIndex(fixture.graph);
+const anchors = buildEdgeAnchors(fixture.graph, index);
 
 function makeHarness() {
 	const positions = layoutLayered(fixture.graph, index).positions;
@@ -36,7 +38,7 @@ function makeHarness() {
 
 	const calls = { schedule: 0, positionsWritten: 0, dragStarted: 0, dragEnded: 0 };
 
-	const scene: InteractionScene = { graph: fixture.graph, index, positions, tree };
+	const scene: InteractionScene = { positions, anchors, tree };
 	const controller = new InteractionController({
 		viewport,
 		selection,
@@ -143,7 +145,7 @@ console.log('\n=== picking ===\n');
 	let target = -1;
 	let px = 0, py = 0;
 	for (let e = 0; e < fixture.graph.edges.length && target < 0; e++) {
-		if (!writeEdgeGeometry(g, fixture.graph, index, h.positions, e)) continue;
+		if (!writeEdgeGeometry(g, anchors, h.positions, e)) continue;
 		const t = 0.5, u = 0.5;
 		const x = u*u*u*g.fromX + 3*u*u*t*g.c1x + 3*u*t*t*g.c2x + t*t*t*g.toX;
 		const y = u*u*u*g.fromY + 3*u*u*t*g.c1y + 3*u*t*t*g.c2y + t*t*t*g.toY;
@@ -294,7 +296,7 @@ console.log('\n=== an edge under the cursor is not a handle ===\n');
 	const g = createEdgeGeometry();
 	let px = 0, py = 0, found = -1;
 	for (let e = 0; e < fixture.graph.edges.length && found < 0; e++) {
-		if (!writeEdgeGeometry(g, fixture.graph, index, h.positions, e)) continue;
+		if (!writeEdgeGeometry(g, anchors, h.positions, e)) continue;
 		const t = 0.5, u = 0.5;
 		const x = u*u*u*g.fromX + 3*u*u*t*g.c1x + 3*u*t*t*g.c2x + t*t*t*g.toX;
 		const y = u*u*u*g.fromY + 3*u*u*t*g.c1y + 3*u*t*t*g.c2y + t*t*t*g.toY;

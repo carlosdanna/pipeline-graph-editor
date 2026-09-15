@@ -1,40 +1,57 @@
 import { portOffsetY } from '$lib/graph/generate';
-import type { GraphIndex } from '$lib/graph/indexing';
 import type { PositionStore } from '$lib/graph/positions';
-import { DATA_TYPES, type PipelineGraph, type Rect } from '$lib/graph/types';
+import { DATA_TYPES, type NodeDynamics, type PipelineGraph, type Rect } from '$lib/graph/types';
 import type { SelectionStore } from '$lib/interact/selection.svelte';
+import { edgeVisible, type ViewRect } from './cull';
+import type { EdgeAnchors } from './edge-anchors';
 import type { EdgeBuckets } from './edge-buckets';
 import { createEdgeGeometry, writeEdgeGeometry } from './edge-geometry';
+import type { DetailLevel } from './limits';
+import { drawNodes } from './nodes';
 import { DATA_TYPE_COLOR, PALETTE, SELECTION } from './theme';
 
 /**
- * Everything drawn on the canvas: the background grid, every edge, the port
- * dots that edges terminate on, and — from phase 4 — selection and the marquee.
+ * Everything drawn on the canvas: the background grid, edges, ports, selection,
+ * the marquee, and — from phase 5 — nodes, whenever they are not DOM elements.
  *
- * Nodes are NOT here — they are DOM elements in a CSS-transformed layer above
- * this canvas, sharing the same transform. Phase 5 adds a canvas fallback for
- * nodes above a threshold.
+ * Two rules govern this file.
  *
- * Why ports are on the canvas and not on the node elements: an edge endpoint and
- * the dot it lands on are the same piece of geometry, and drawing them from the
- * same numbers is the only way to guarantee they never disagree. It also strips
- * ~4 elements off every node, which is 8,000 fewer DOM nodes at the 2,000-node
- * fixture.
+ * **Nothing off screen is drawn.** Every loop here is either over the culled
+ * node list the renderer hands in, or over all edges with a cull test that is
+ * an order of magnitude cheaper than drawing one. The `visibleNodes` count the
+ * HUD has been reporting since phase 3 finally means something.
  *
- * Selection is drawn here too, rather than as a CSS class on the node elements.
- * That is what lets a marquee change the selection at 60fps without touching
- * Svelte's reactivity at all — and it means selection rendering does not change
- * when phase 5 stops putting nodes in the DOM.
+ * **Detail is a function of zoom.** Below half scale there are no labels and no
+ * ports; below quarter scale nodes are dots and edges are straight lines. This
+ * is a legibility decision that happens to be a performance decision: a 5.5px
+ * label is noise, and not drawing noise is free.
+ *
+ * Ports are on the canvas rather than on the node elements because an edge
+ * endpoint and the dot it lands on are the same geometry, and drawing both from
+ * the same numbers is the only way to guarantee they never disagree.
+ *
+ * Selection is on the canvas rather than a CSS class so a marquee over 2,000
+ * nodes costs no DOM work — and so that it keeps working unchanged when nodes
+ * stop being elements.
  */
 
 export interface SceneInput {
 	readonly graph: PipelineGraph;
-	readonly index: GraphIndex;
+	readonly dynamics: readonly NodeDynamics[];
 	readonly positions: PositionStore;
 	readonly buckets: EdgeBuckets;
+	readonly anchors: EdgeAnchors;
 	readonly selection: SelectionStore;
 	/** Live marquee box in graph units, or null. */
 	readonly marquee: Rect | null;
+	/** On-screen node indices, and how much of the buffer is in use. */
+	readonly visible: Int32Array;
+	readonly visibleCount: number;
+	/** The cull region. Infinite when culling is switched off. */
+	readonly view: ViewRect;
+	readonly detail: DetailLevel;
+	/** True when this canvas owns the node bodies, not the DOM layer. */
+	readonly nodesOnCanvas: boolean;
 	readonly viewport: { x: number; y: number; k: number };
 	readonly cssWidth: number;
 	readonly cssHeight: number;
@@ -45,7 +62,10 @@ export interface SceneStats {
 	readonly drawMs: number;
 	readonly visibleNodes: number;
 	readonly totalNodes: number;
+	readonly visibleEdges: number;
 	readonly edgeCount: number;
+	readonly detail: DetailLevel;
+	readonly nodesOnCanvas: boolean;
 }
 
 /** Base grid spacing in graph units, before zoom-dependent subdivision. */
@@ -103,9 +123,24 @@ export function drawScene(ctx: CanvasRenderingContext2D, input: SceneInput): Sce
 		dpr * viewport.y
 	);
 
-	drawEdges(ctx, input);
+	const visibleEdges = drawEdges(ctx, input);
 	drawSelectedEdges(ctx, input);
-	const visibleNodes = drawPortsAndCountVisible(ctx, input);
+
+	if (input.nodesOnCanvas) {
+		drawNodes(ctx, {
+			graph: input.graph,
+			dynamics: input.dynamics,
+			positions: input.positions,
+			visible: input.visible,
+			visibleCount: input.visibleCount,
+			detail: input.detail,
+			zoom: viewport.k
+		});
+	}
+
+	// Ports carry no information once they are a pixel across.
+	if (input.detail === 'full') drawPorts(ctx, input);
+
 	drawNodeSelection(ctx, input);
 	drawMarquee(ctx, input);
 
@@ -113,9 +148,12 @@ export function drawScene(ctx: CanvasRenderingContext2D, input: SceneInput): Sce
 
 	return {
 		drawMs: performance.now() - startedAt,
-		visibleNodes,
+		visibleNodes: input.visibleCount,
 		totalNodes: input.graph.nodes.length,
-		edgeCount: input.graph.edges.length
+		visibleEdges,
+		edgeCount: input.graph.edges.length,
+		detail: input.detail,
+		nodesOnCanvas: input.nodesOnCanvas
 	};
 }
 
@@ -153,13 +191,32 @@ function drawGrid(ctx: CanvasRenderingContext2D, input: SceneInput): void {
 	ctx.stroke();
 }
 
-function drawEdges(ctx: CanvasRenderingContext2D, input: SceneInput): void {
-	const { graph, index, positions, buckets, viewport } = input;
+/**
+ * Every visible edge, one accumulated path per data type.
+ *
+ * The cull test runs inside the bucket loop rather than producing a separate
+ * visible-edge list first. Keeping it here preserves the colour batching
+ * exactly as phase 3 built it — still one stroke per data type — and means the
+ * rejected edges cost four comparisons instead of a `bezierCurveTo`.
+ *
+ * At the coarsest tier the curve is replaced by a straight line between node
+ * *centres* — not between the ports. Nodes are dots at their centre by then, so
+ * an edge drawn to a port would stop half a node width short and hang in space,
+ * about twenty screen pixels of line ending in nothing. Running centre to
+ * centre also skips `writeEdgeGeometry` entirely: four array reads and a
+ * `lineTo`, which is the cheapest this loop ever gets, at exactly the zoom
+ * where it has the most edges to draw.
+ */
+function drawEdges(ctx: CanvasRenderingContext2D, input: SceneInput): number {
+	const { anchors, positions, buckets, viewport, view, detail } = input;
 
 	// Line width is in graph units now, so undo the zoom to keep edges a
 	// constant thickness on screen.
 	ctx.lineWidth = EDGE_WIDTH_SCREEN_PX / viewport.k;
 	ctx.globalAlpha = 0.55;
+
+	const straight = detail === 'dot';
+	let visible = 0;
 
 	for (const type of DATA_TYPES) {
 		const bucket = buckets[type];
@@ -168,7 +225,26 @@ function drawEdges(ctx: CanvasRenderingContext2D, input: SceneInput): void {
 		ctx.strokeStyle = DATA_TYPE_COLOR[type];
 		ctx.beginPath();
 		for (let i = 0; i < bucket.length; i++) {
-			if (!writeEdgeGeometry(geometry, graph, index, positions, bucket[i])) continue;
+			const e = bucket[i];
+			if (!edgeVisible(anchors, positions, e, view, straight)) continue;
+
+			if (straight) {
+				const from = anchors.source[e];
+				const to = anchors.target[e];
+				visible++;
+				ctx.moveTo(
+					positions.x[from] + anchors.sourceCentreX[e],
+					positions.y[from] + anchors.sourceCentreY[e]
+				);
+				ctx.lineTo(
+					positions.x[to] + anchors.targetCentreX[e],
+					positions.y[to] + anchors.targetCentreY[e]
+				);
+				continue;
+			}
+
+			if (!writeEdgeGeometry(geometry, anchors, positions, e)) continue;
+			visible++;
 			ctx.moveTo(geometry.fromX, geometry.fromY);
 			ctx.bezierCurveTo(
 				geometry.c1x,
@@ -183,6 +259,7 @@ function drawEdges(ctx: CanvasRenderingContext2D, input: SceneInput): void {
 	}
 
 	ctx.globalAlpha = 1;
+	return visible;
 }
 
 /**
@@ -190,25 +267,44 @@ function drawEdges(ctx: CanvasRenderingContext2D, input: SceneInput): void {
  *
  * Drawing them a second time rather than skipping them in the first pass keeps
  * the colour buckets untouched — they are built once per graph and would
- * otherwise have to be rebuilt on every selection change. The overdraw is one
- * extra stroke of however many edges are selected, which is bounded by what
- * someone can actually pick.
+ * otherwise have to be rebuilt on every selection change.
  *
  * The scan over `edgeFlags` is skipped entirely when nothing is selected, which
- * is the common case and the one that must stay free.
+ * is the common case and the one that must stay free. Phase 4 measured this
+ * pass at +2.2 ms with everything selected at 10k; culling is what brings that
+ * back down, since it now only re-strokes the selected edges *on screen*.
  */
 function drawSelectedEdges(ctx: CanvasRenderingContext2D, input: SceneInput): void {
-	const { graph, index, positions, selection, viewport } = input;
+	const { anchors, positions, selection, viewport, view, detail } = input;
 	if (selection.edgeCount === 0) return;
 
 	const flags = selection.edgeFlags;
+	const straight = detail === 'dot';
+
 	ctx.strokeStyle = SELECTION.edge;
 	ctx.lineWidth = SELECTED_EDGE_WIDTH_SCREEN_PX / viewport.k;
 	ctx.beginPath();
 
 	for (let e = 0; e < flags.length; e++) {
 		if (flags[e] !== 1) continue;
-		if (!writeEdgeGeometry(geometry, graph, index, positions, e)) continue;
+		if (!edgeVisible(anchors, positions, e, view, straight)) continue;
+
+		if (straight) {
+			const from = anchors.source[e];
+			const to = anchors.target[e];
+			if (from < 0 || to < 0) continue;
+			ctx.moveTo(
+				positions.x[from] + anchors.sourceCentreX[e],
+				positions.y[from] + anchors.sourceCentreY[e]
+			);
+			ctx.lineTo(
+				positions.x[to] + anchors.targetCentreX[e],
+				positions.y[to] + anchors.targetCentreY[e]
+			);
+			continue;
+		}
+
+		if (!writeEdgeGeometry(geometry, anchors, positions, e)) continue;
 		ctx.moveTo(geometry.fromX, geometry.fromY);
 		ctx.bezierCurveTo(
 			geometry.c1x,
@@ -224,35 +320,27 @@ function drawSelectedEdges(ctx: CanvasRenderingContext2D, input: SceneInput): vo
 }
 
 /**
- * Draws port dots and, in the same pass, counts how many nodes are on screen.
+ * Port dots, for on-screen nodes only, at the full detail tier only.
  *
- * The count is for the HUD only — phase 4 still draws everything. Watching
- * "visible 40 / 2,000" while the frame time says otherwise is the whole
- * argument for phase 5.
+ * This loop used to run over every node in the graph and was the single largest
+ * item in the phase 3 frame — 24,800 rects at the 10k fixture. It is now
+ * bounded by the viewport.
  */
-function drawPortsAndCountVisible(ctx: CanvasRenderingContext2D, input: SceneInput): number {
-	const { graph, positions, viewport: vp, cssWidth, cssHeight } = input;
+function drawPorts(ctx: CanvasRenderingContext2D, input: SceneInput): void {
+	const { graph, positions, visible, visibleCount, viewport } = input;
 
-	const left = (0 - vp.x) / vp.k;
-	const top = (0 - vp.y) / vp.k;
-	const right = (cssWidth - vp.x) / vp.k;
-	const bottom = (cssHeight - vp.y) / vp.k;
-
-	const size = PORT_SIZE_SCREEN_PX / vp.k;
+	const size = PORT_SIZE_SCREEN_PX / viewport.k;
 	const half = size / 2;
 
 	// One accumulated path per data type, filled once — same reasoning as edges.
 	const paths: Record<string, Path2D> = {};
 	for (const type of DATA_TYPES) paths[type] = new Path2D();
 
-	let visible = 0;
-	for (let i = 0; i < graph.nodes.length; i++) {
+	for (let v = 0; v < visibleCount; v++) {
+		const i = visible[v];
 		const node = graph.nodes[i];
 		const x = positions.x[i];
 		const y = positions.y[i];
-
-		const onScreen = x < right && x + node.width > left && y < bottom && y + node.height > top;
-		if (onScreen) visible++;
 
 		for (let s = 0; s < node.inputs.length; s++) {
 			const py = y + portOffsetY(s, node.inputs.length, node.height);
@@ -268,21 +356,22 @@ function drawPortsAndCountVisible(ctx: CanvasRenderingContext2D, input: SceneInp
 		ctx.fillStyle = DATA_TYPE_COLOR[type];
 		ctx.fill(paths[type]);
 	}
-
-	return visible;
 }
 
 /**
- * A ring around every selected node.
+ * A ring around every selected node that is on screen.
  *
  * Drawn *outside* the node bounds, which is what makes one mechanism work for
  * both render modes: it stays visible under an opaque DOM node element, and it
- * will stay visible around a canvas-drawn node in phase 5. The gap and the
- * stroke are specified in screen pixels and divided by the zoom, so the ring
- * stays legible whether you are at 3x or at 0.02x.
+ * stays visible around a canvas-drawn node. The gap and the stroke are
+ * specified in screen pixels and divided by the zoom, so the ring stays legible
+ * whether you are at 3x or at 0.02x.
+ *
+ * Since phase 5 this walks the culled list rather than the whole flag array, so
+ * its cost is bounded by the screen rather than by how much is selected.
  */
 function drawNodeSelection(ctx: CanvasRenderingContext2D, input: SceneInput): void {
-	const { graph, positions, selection, viewport } = input;
+	const { graph, positions, selection, visible, visibleCount, viewport } = input;
 	if (selection.nodeCount === 0) return;
 
 	const flags = selection.nodeFlags;
@@ -292,7 +381,8 @@ function drawNodeSelection(ctx: CanvasRenderingContext2D, input: SceneInput): vo
 	ctx.lineWidth = SELECTION_RING_WIDTH_PX / viewport.k;
 	ctx.beginPath();
 
-	for (let i = 0; i < flags.length; i++) {
+	for (let v = 0; v < visibleCount; v++) {
+		const i = visible[v];
 		if (flags[i] !== 1) continue;
 		const node = graph.nodes[i];
 		ctx.rect(

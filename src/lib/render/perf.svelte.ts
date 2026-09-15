@@ -1,3 +1,4 @@
+import type { DetailLevel } from './limits';
 import type { SceneStats } from './scene';
 
 /**
@@ -22,8 +23,13 @@ export class PerfMonitor {
 	frameMaxMs = $state(0);
 	visibleNodes = $state(0);
 	totalNodes = $state(0);
+	visibleEdges = $state(0);
 	edgeCount = $state(0);
 	zoom = $state(1);
+	/** Which semantic-zoom tier the last frame drew at. */
+	detail = $state<DetailLevel>('full');
+	/** True when the canvas is drawing node bodies rather than the DOM layer. */
+	nodesOnCanvas = $state(false);
 	/** False when nothing has been drawn recently; FPS is then not reported. */
 	active = $state(false);
 	/** Pushed by the session, not measured here. */
@@ -56,8 +62,11 @@ export class PerfMonitor {
 		// Assign only on change: every write here is a potential re-render.
 		if (this.visibleNodes !== stats.visibleNodes) this.visibleNodes = stats.visibleNodes;
 		if (this.totalNodes !== stats.totalNodes) this.totalNodes = stats.totalNodes;
+		if (this.visibleEdges !== stats.visibleEdges) this.visibleEdges = stats.visibleEdges;
 		if (this.edgeCount !== stats.edgeCount) this.edgeCount = stats.edgeCount;
 		if (this.zoom !== zoom) this.zoom = zoom;
+		if (this.detail !== stats.detail) this.detail = stats.detail;
+		if (this.nodesOnCanvas !== stats.nodesOnCanvas) this.nodesOnCanvas = stats.nodesOnCanvas;
 		if (!this.active) this.active = true;
 	}
 

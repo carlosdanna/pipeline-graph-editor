@@ -1,132 +1,181 @@
 /**
- * What selection costs the draw loop.
+ * What culling and semantic zoom buy, at 2,000 and 10,000 nodes.
  *
- * Drives the real `drawScene` against a stub 2D context that counts calls. This
- * measures OUR JavaScript only — no rasterisation, which is the browser's and is
- * far larger. The numbers are a floor, and the useful thing is the *delta*
- * between drawing with nothing selected and drawing with everything selected.
+ * Drives the real `drawScene` against a stub 2D context that counts calls, and
+ * mirrors exactly what `HybridRenderer` does each frame — same cull, same
+ * detail tier, same DOM-or-canvas decision — so the rows correspond to what the
+ * HUD shows with the two checkboxes on and off.
+ *
+ * This measures OUR JavaScript only. Rasterisation is the browser's and is far
+ * larger, so treat these as a floor and a ratio, not as frame times. The ratio
+ * is the point: it is the same work the GPU is also being asked to do.
  */
 import { generateFixture, FIXTURE_SIZES } from '$lib/graph/generate';
 import { buildGraphIndex } from '$lib/graph/indexing';
 import { layoutLayered } from '$lib/layout/layered';
 import { graphBounds } from '$lib/graph/positions';
+import { buildEdgeAnchors } from '$lib/render/edge-anchors';
 import { buildEdgeBuckets } from '$lib/render/edge-buckets';
+import { cullNodes, viewRectFor, type ViewRect } from '$lib/render/cull';
+import { detailFor, DOM_NODE_LIMIT } from '$lib/render/limits';
 import { drawScene } from '$lib/render/scene';
 import { SelectionStore } from '$lib/interact/selection.svelte';
 import { Viewport } from '$lib/render/viewport';
 
 class StubPath2D {
 	rect(): void {}
+	roundRect(): void {}
 }
 (globalThis as any).Path2D = StubPath2D;
 
-const counts = { bezier: 0, stroke: 0, fill: 0, rect: 0, fillRect: 0, strokeRect: 0 };
+const calls = { bezier: 0, line: 0, stroke: 0, fill: 0, text: 0 };
 
 const ctx = new Proxy(
 	{},
 	{
 		get(_t, prop: string) {
-			if (prop === 'bezierCurveTo') return () => counts.bezier++;
-			if (prop === 'stroke') return () => counts.stroke++;
-			if (prop === 'fill') return () => counts.fill++;
-			if (prop === 'rect') return () => counts.rect++;
-			if (prop === 'fillRect') return () => counts.fillRect++;
-			if (prop === 'strokeRect') return () => counts.strokeRect++;
-			return () => {};
+			switch (prop) {
+				case 'bezierCurveTo':
+					return () => calls.bezier++;
+				case 'lineTo':
+					return () => calls.line++;
+				case 'stroke':
+					return () => calls.stroke++;
+				case 'fill':
+					return () => calls.fill++;
+				case 'fillText':
+					return () => calls.text++;
+				case 'measureText':
+					return () => ({ width: 40 });
+				default:
+					return () => {};
+			}
 		},
 		set: () => true
 	}
 ) as unknown as CanvasRenderingContext2D;
 
+const UNBOUNDED: ViewRect = {
+	left: -Infinity,
+	top: -Infinity,
+	right: Infinity,
+	bottom: Infinity
+};
+
 const WIDTH = 1440;
 const HEIGHT = 820;
+const SAMPLES = 40;
 
 function median(values: number[]): number {
 	return [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
 }
 
-console.log('\n  fixture |     selection | draw ms (median / p90) |  strokes | overhead');
-console.log('  --------|---------------|------------------------|----------|---------');
-
 for (const size of FIXTURE_SIZES) {
 	const fixture = generateFixture(size);
 	const index = buildGraphIndex(fixture.graph);
 	const positions = layoutLayered(fixture.graph, index).positions;
+	const anchors = buildEdgeAnchors(fixture.graph, index);
 	const buckets = buildEdgeBuckets(fixture.graph);
+	const selection = new SelectionStore(fixture.graph.nodes.length, fixture.graph.edges.length);
+	const buffer = new Int32Array(fixture.graph.nodes.length);
 
 	const viewport = new Viewport();
-	viewport.fit(graphBounds(fixture.graph, positions), WIDTH, HEIGHT);
+	const bounds = graphBounds(fixture.graph, positions);
+	viewport.fit(bounds, WIDTH, HEIGHT);
+	const fitZoom = viewport.k;
 
-	const selection = new SelectionStore(fixture.graph.nodes.length, fixture.graph.edges.length);
+	console.log(
+		`\n${size.toLocaleString()} nodes, ${fixture.graph.edges.length.toLocaleString()} edges` +
+			`   (fit = ${fitZoom.toFixed(3)}x)`
+	);
+	console.log(
+		'   zoom | culling | semantic | draw ms |  nodes drawn  |  edges drawn  | detail | via'
+	);
+	console.log(
+		'  ------|---------|----------|---------|---------------|---------------|--------|-------'
+	);
 
-	const run = (label: string, baseline: number | null): number => {
+	/** Centres the viewport on the graph at a given zoom, like a user would be. */
+	const place = (k: number): void => {
+		viewport.k = k;
+		viewport.x = WIDTH / 2 - (bounds.x + bounds.width / 2) * k;
+		viewport.y = HEIGHT / 2 - (bounds.y + bounds.height / 2) * k;
+	};
+
+	const measure = (zoomLabel: string, culling: boolean, semantic: boolean): void => {
+		// Exactly what HybridRenderer#draw does.
+		const detail = semantic ? detailFor(viewport.k) : 'full';
+		const nodesOnCanvas = fixture.graph.nodes.length > DOM_NODE_LIMIT || detail !== 'full';
+		const view = culling ? viewRectFor(viewport, WIDTH, HEIGHT) : UNBOUNDED;
+		const visibleCount = cullNodes(fixture.graph, positions, view, buffer);
+
 		const input = {
 			graph: fixture.graph,
-			index,
+			dynamics: fixture.initialDynamics,
 			positions,
 			buckets,
+			anchors,
 			selection,
 			marquee: null,
+			visible: buffer,
+			visibleCount,
+			view,
+			detail,
+			nodesOnCanvas,
 			viewport,
 			cssWidth: WIDTH,
 			cssHeight: HEIGHT,
 			devicePixelRatio: 2
 		};
-		// Warm up, then measure.
-		for (let i = 0; i < 20; i++) drawScene(ctx, input);
-		for (const k of Object.keys(counts) as (keyof typeof counts)[]) counts[k] = 0;
 
+		for (let i = 0; i < 10; i++) drawScene(ctx, input);
 		const times: number[] = [];
-		for (let i = 0; i < 60; i++) times.push(drawScene(ctx, input).drawMs);
-		const strokes = counts.stroke / 60;
+		let stats = drawScene(ctx, input);
+		for (let i = 0; i < SAMPLES; i++) {
+			stats = drawScene(ctx, input);
+			times.push(stats.drawMs);
+		}
 
-		const med = median(times);
-		const p90 = [...times].sort((a, b) => a - b)[Math.floor(times.length * 0.9)];
-		const overhead = baseline === null ? '—' : `+${(med - baseline).toFixed(2)} ms`;
+		const nodes = `${stats.visibleNodes.toLocaleString()}/${stats.totalNodes.toLocaleString()}`;
+		const edges = `${stats.visibleEdges.toLocaleString()}/${stats.edgeCount.toLocaleString()}`;
 		console.log(
-			`  ${String(size).padStart(6)}  | ${label.padStart(13)} | ` +
-				`${med.toFixed(2).padStart(8)} / ${p90.toFixed(2).padStart(6)} ms    | ` +
-				`${strokes.toFixed(0).padStart(7)}  | ${overhead}`
+			`  ${zoomLabel.padStart(5)} | ${(culling ? 'on' : 'OFF').padStart(7)} | ` +
+				`${(semantic ? 'on' : 'OFF').padStart(8)} | ` +
+				`${median(times).toFixed(2).padStart(6)}  | ${nodes.padStart(13)} | ` +
+				`${edges.padStart(13)} | ${stats.detail.padStart(6)} | ` +
+				`${stats.nodesOnCanvas ? 'canvas' : 'dom'}`
 		);
-		return med;
 	};
 
-	const baseline = run('none', null);
+	for (const [label, k] of [
+		['fit', fitZoom],
+		['0.25', 0.25],
+		['0.5', 0.5],
+		['1.0', 1.0]
+	] as const) {
+		place(k as number);
+		measure(label, false, false);
+		measure(label, true, false);
+		measure(label, true, true);
+		console.log(
+			'  ------|---------|----------|---------|---------------|---------------|--------|-------'
+		);
+	}
 
-	// One node — the common case after a click.
-	selection.selectNode(Math.floor(fixture.graph.nodes.length / 2), false);
-	run('1 node', baseline);
-
-	// Everything: the pathological case, and what a full-graph marquee produces.
+	// Phase 4 measured "everything selected" at +2.15 ms at 10k, because the
+	// selected-edge pass re-strokes every edge. Culling should bound it.
 	const allNodes: number[] = [];
 	for (let i = 0; i < fixture.graph.nodes.length; i++) allNodes.push(i);
 	const allEdges: number[] = [];
 	for (let e = 0; e < fixture.graph.edges.length; e++) allEdges.push(e);
 	selection.replaceNodes(allNodes, null);
 	selection.setEdges(allEdges);
-	run('everything', baseline);
 
-	// A live marquee over the whole viewport, with everything selected.
-	const input = {
-		graph: fixture.graph,
-		index,
-		positions,
-		buckets,
-		selection,
-		marquee: { x: 0, y: 0, width: 5000, height: 5000 },
-		viewport,
-		cssWidth: WIDTH,
-		cssHeight: HEIGHT,
-		devicePixelRatio: 2
-	};
-	for (let i = 0; i < 20; i++) drawScene(ctx, input);
-	const times: number[] = [];
-	for (let i = 0; i < 60; i++) times.push(drawScene(ctx, input).drawMs);
-	console.log(
-		`  ${String(size).padStart(6)}  | ${'+ marquee'.padStart(13)} | ` +
-			`${median(times).toFixed(2).padStart(8)} / ` +
-			`${[...times].sort((a, b) => a - b)[54].toFixed(2).padStart(6)} ms    | ` +
-			`${'—'.padStart(7)}  | +${(median(times) - baseline).toFixed(2)} ms`
-	);
-	console.log('  --------|---------------|------------------------|----------|---------');
+	place(1.0);
+	console.log('  everything selected:');
+	measure('1.0', false, false);
+	measure('1.0', true, true);
+	selection.clear();
 }
+
+console.log('');

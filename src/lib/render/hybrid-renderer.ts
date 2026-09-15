@@ -1,11 +1,14 @@
-import type { GraphIndex } from '$lib/graph/indexing';
 import { graphBounds, type PositionStore } from '$lib/graph/positions';
-import type { PipelineGraph, Rect } from '$lib/graph/types';
+import type { NodeDynamics, PipelineGraph, Rect } from '$lib/graph/types';
 import type { SelectionStore } from '$lib/interact/selection.svelte';
+import { cullNodes, viewRectFor, type ViewRect } from './cull';
+import type { EdgeAnchors } from './edge-anchors';
 import type { EdgeBuckets } from './edge-buckets';
 import { FrameScheduler } from './frame';
+import { detailFor, DOM_NODE_LIMIT, type DetailLevel } from './limits';
 import type { PerfMonitor } from './perf.svelte';
 import { drawScene } from './scene';
+import type { VisibleNodes } from './visible.svelte';
 import { WHEEL_ZOOM_RATE, type Viewport } from './viewport';
 
 /**
@@ -40,11 +43,27 @@ import { WHEEL_ZOOM_RATE, type Viewport } from './viewport';
 
 export interface Scene {
 	readonly graph: PipelineGraph;
-	readonly index: GraphIndex;
+	readonly dynamics: readonly NodeDynamics[];
 	readonly positions: PositionStore;
 	readonly buckets: EdgeBuckets;
+	readonly anchors: EdgeAnchors;
 	readonly selection: SelectionStore;
 }
+
+/**
+ * Culling switched off: everything is inside this rectangle.
+ *
+ * Disabling culling this way, rather than with a branch in every draw loop,
+ * keeps the "off" path identical to the phase 4 code it is meant to be compared
+ * against — the loops do not know the difference, so the HUD comparison
+ * measures culling and not a second code path.
+ */
+const UNBOUNDED: ViewRect = {
+	left: -Infinity,
+	top: -Infinity,
+	right: Infinity,
+	bottom: Infinity
+};
 
 /**
  * A pointer event, already reduced to what a gesture needs.
@@ -77,6 +96,7 @@ export class HybridRenderer {
 	readonly viewport: Viewport;
 
 	#perf: PerfMonitor;
+	#visible: VisibleNodes;
 	#scheduler: FrameScheduler;
 
 	#canvas: HTMLCanvasElement | null = null;
@@ -99,10 +119,32 @@ export class HybridRenderer {
 	#lastPointerY = 0;
 	#pendingFit = false;
 
-	constructor(viewport: Viewport, perf: PerfMonitor) {
+	/**
+	 * Reused across frames: the culled node indices. Grown to fit the graph and
+	 * never shrunk, so a pan allocates nothing.
+	 */
+	#cullBuffer = new Int32Array(0);
+
+	// Both default on. They exist so the phase 5 numbers can be compared against
+	// the phase 4 ones live, in the HUD, rather than only in a table.
+	#cullingEnabled = true;
+	#semanticZoomEnabled = true;
+
+	constructor(viewport: Viewport, perf: PerfMonitor, visible: VisibleNodes) {
 		this.viewport = viewport;
 		this.#perf = perf;
+		this.#visible = visible;
 		this.#scheduler = new FrameScheduler((now) => this.#draw(now));
+	}
+
+	setCulling(enabled: boolean): void {
+		this.#cullingEnabled = enabled;
+		this.schedule();
+	}
+
+	setSemanticZoom(enabled: boolean): void {
+		this.#semanticZoomEnabled = enabled;
+		this.schedule();
 	}
 
 	schedule(): void {
@@ -350,13 +392,37 @@ export class HybridRenderer {
 			this.#pendingFit = false;
 		}
 
+		const nodeCount = scene.graph.nodes.length;
+		if (this.#cullBuffer.length < nodeCount) this.#cullBuffer = new Int32Array(nodeCount);
+
+		const detail: DetailLevel = this.#semanticZoomEnabled
+			? detailFor(this.viewport.k)
+			: 'full';
+
+		// Nodes stay in the DOM only while both things are true: there are few
+		// enough of them, and we are zoomed in far enough for an element to be
+		// carrying information. Either one failing hands them to the canvas.
+		const nodesOnCanvas = nodeCount > DOM_NODE_LIMIT || detail !== 'full';
+
+		const view = this.#cullingEnabled
+			? viewRectFor(this.viewport, this.#cssWidth, this.#cssHeight)
+			: UNBOUNDED;
+
+		const visibleCount = cullNodes(scene.graph, scene.positions, view, this.#cullBuffer);
+
 		const stats = drawScene(ctx, {
 			graph: scene.graph,
-			index: scene.index,
+			dynamics: scene.dynamics,
 			positions: scene.positions,
 			buckets: scene.buckets,
+			anchors: scene.anchors,
 			selection: scene.selection,
 			marquee: this.#input?.marquee ?? null,
+			visible: this.#cullBuffer,
+			visibleCount,
+			view,
+			detail,
+			nodesOnCanvas,
 			viewport: this.viewport,
 			cssWidth: this.#cssWidth,
 			cssHeight: this.#cssHeight,
@@ -365,6 +431,11 @@ export class HybridRenderer {
 
 		// Same frame as the canvas draw. This is the whole point of the class.
 		this.#applyLayerTransform();
+
+		// This one deliberately does not have to be the same frame — see
+		// visible.svelte.ts for why the cull margin makes that safe.
+		if (nodesOnCanvas) this.#visible.clear();
+		else this.#visible.publish(this.#cullBuffer, visibleCount);
 
 		this.#perf.record(now, stats, this.viewport.k);
 	}

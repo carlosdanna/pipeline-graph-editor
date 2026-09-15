@@ -24,7 +24,7 @@
 
 <div class="app">
 	<header>
-		<h1>Pipeline graph editor <span class="phase">phase 4 — interaction</span></h1>
+		<h1>Pipeline graph editor <span class="phase">phase 5 — culling and semantic zoom</span></h1>
 
 		<span class="status" data-phase={session.layoutPhase}>
 			{#if session.layoutPhase === 'running'}
@@ -130,15 +130,40 @@
 	<p class="hint">
 		drag to pan · wheel to zoom · click a node or edge to select · shift-click to toggle ·
 		shift-drag empty space to marquee · drag a node to move it
+
+		<span class="toggles">
+			<!--
+				These two exist so the phase 5 before/after can be read straight off
+				the HUD. Turning culling off restores the phase 4 draw loop exactly.
+			-->
+			<label>
+				<input
+					type="checkbox"
+					checked={session.cullingEnabled}
+					onchange={(e) => session.setCulling(e.currentTarget.checked)}
+				/>
+				cull
+			</label>
+			<label>
+				<input
+					type="checkbox"
+					checked={session.semanticZoomEnabled}
+					onchange={(e) => session.setSemanticZoom(e.currentTarget.checked)}
+				/>
+				semantic zoom
+			</label>
+		</span>
 	</p>
 
 	<main>
 		<GraphCanvas
 			graph={state.graph}
-			index={state.index}
 			positions={state.positions}
 			dynamics={state.dynamics}
+			anchors={state.anchors}
+			buckets={state.buckets}
 			selection={session.selection}
+			visible={session.visibleNodes}
 			geometryVersion={session.positionsVersion}
 			renderer={session.renderer}
 		/>
@@ -276,12 +301,33 @@
 	}
 
 	.hint {
+		display: flex;
+		align-items: center;
+		gap: 16px;
 		margin: 0;
 		padding: 6px 16px;
 		font-size: 10.5px;
 		color: var(--text-muted);
 		border-bottom: 1px solid var(--border);
 		background: var(--surface);
+	}
+
+	.toggles {
+		display: flex;
+		gap: 12px;
+		margin-left: auto;
+	}
+
+	.toggles label {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		cursor: pointer;
+	}
+
+	.toggles input {
+		margin: 0;
+		accent-color: #4fb3ff;
 	}
 
 	.errors {

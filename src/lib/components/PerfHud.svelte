@@ -14,7 +14,8 @@
 		return () => clearInterval(timer);
 	});
 
-	const culled = $derived(perf.totalNodes - perf.visibleNodes);
+	const culledNodes = $derived(perf.totalNodes - perf.visibleNodes);
+	const culledEdges = $derived(perf.edgeCount - perf.visibleEdges);
 </script>
 
 <aside class="hud" aria-live="off">
@@ -39,17 +40,29 @@
 		</span>
 	</div>
 	<div class="row">
-		<span class="key">offscreen</span>
-		<!-- Counted but still drawn. Phase 5 is what makes this number mean something. -->
-		<span class="value" class:stale={culled > 0}>{culled.toLocaleString()}</span>
+		<span class="key">edges</span>
+		<span class="value">
+			{perf.visibleEdges.toLocaleString()} / {perf.edgeCount.toLocaleString()}
+		</span>
 	</div>
 	<div class="row">
-		<span class="key">edges</span>
-		<span class="value">{perf.edgeCount.toLocaleString()}</span>
+		<span class="key">culled</span>
+		<!-- What phase 5 is buying, in one number. -->
+		<span class="value" class:good={culledNodes + culledEdges > 0}>
+			{(culledNodes + culledEdges).toLocaleString()}
+		</span>
 	</div>
 	<div class="row">
 		<span class="key">zoom</span>
 		<span class="value">{perf.zoom.toFixed(3)}x</span>
+	</div>
+	<div class="row">
+		<span class="key">detail</span>
+		<span class="value" class:stale={perf.detail !== 'full'}>{perf.detail}</span>
+	</div>
+	<div class="row">
+		<span class="key">nodes via</span>
+		<span class="value">{perf.nodesOnCanvas ? 'canvas' : 'dom'}</span>
 	</div>
 	<div class="row">
 		<span class="key">layout</span>
@@ -101,5 +114,9 @@
 
 	.value.stale {
 		color: #7d8a9c;
+	}
+
+	.value.good {
+		color: #34d399;
 	}
 </style>
