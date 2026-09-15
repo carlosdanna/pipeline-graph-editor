@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import GraphSvg from '$lib/components/GraphSvg.svelte';
+	import GraphCanvas from '$lib/components/GraphCanvas.svelte';
+	import PerfHud from '$lib/components/PerfHud.svelte';
 	import { FIXTURE_SIZES, type FixtureSize } from '$lib/graph/generate';
-	import { SVG_NODE_LIMIT } from '$lib/render/limits';
 	import { GraphSession } from '$lib/state/session.svelte';
 
 	const session = new GraphSession();
@@ -16,7 +16,6 @@
 
 	const state = $derived(session.fixture);
 	const stats = $derived(state.validation.stats);
-	const renderable = $derived(stats.nodeCount <= SVG_NODE_LIMIT);
 
 	function ms(value: number): string {
 		return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(1)} ms`;
@@ -25,7 +24,7 @@
 
 <div class="app">
 	<header>
-		<h1>Pipeline graph editor <span class="phase">phase 2 — layout worker</span></h1>
+		<h1>Pipeline graph editor <span class="phase">phase 3 — hybrid renderer</span></h1>
 
 		<span class="status" data-phase={session.layoutPhase}>
 			{#if session.layoutPhase === 'running'}
@@ -114,29 +113,15 @@
 	{/if}
 
 	<main>
-		{#if renderable}
-			<GraphSvg
-				graph={state.graph}
-				index={state.index}
-				positions={state.positions}
-				dynamics={state.dynamics}
-				geometryVersion={session.positionsVersion}
-				viewVersion={session.viewVersion}
-			/>
-		{:else}
-			<div class="capped">
-				<p>
-					<strong>{stats.nodeCount.toLocaleString()} nodes laid out</strong> — but not drawn.
-				</p>
-				<p>
-					The SVG renderer is one element per node, port, label and edge: roughly
-					{((stats.nodeCount + stats.edgeCount) * 4).toLocaleString()} elements here. Layout, the worker
-					protocol and the incremental path all still run — the numbers above are real, and
-					<em>+ add stage</em> still exercises the dirty-region path at this size.
-				</p>
-				<p>Phase 3 replaces this renderer with canvas edges and DOM nodes.</p>
-			</div>
-		{/if}
+		<GraphCanvas
+			graph={state.graph}
+			index={state.index}
+			positions={state.positions}
+			dynamics={state.dynamics}
+			geometryVersion={session.positionsVersion}
+			renderer={session.renderer}
+		/>
+		<PerfHud perf={session.perf} />
 	</main>
 </div>
 
@@ -315,20 +300,9 @@
 	}
 
 	main {
+		position: relative;
 		flex: 1;
 		min-height: 0;
 		overflow: hidden;
-	}
-
-	.capped {
-		max-width: 56ch;
-		margin: 10vh auto 0;
-		font-size: 12px;
-		line-height: 1.6;
-		color: var(--text-muted);
-	}
-
-	.capped strong {
-		color: var(--text);
 	}
 </style>

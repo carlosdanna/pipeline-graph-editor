@@ -13,7 +13,8 @@ export const PALETTE = {
 	surfaceRaised: '#1d2531',
 	border: '#2a3442',
 	text: '#c9d4e2',
-	textMuted: '#7d8a9c'
+	textMuted: '#7d8a9c',
+	grid: '#1a212b'
 } as const;
 
 export const KIND_COLOR: Record<NodeKind, string> = {

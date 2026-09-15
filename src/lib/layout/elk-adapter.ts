@@ -1,4 +1,4 @@
-import type { ElkExtendedEdge, ElkNode } from 'elkjs/lib/elk.bundled.js';
+import type { ElkExtendedEdge, ElkNode } from 'elkjs/lib/elk-api.js';
 import type { LayoutRequestMessage } from './protocol';
 
 /**

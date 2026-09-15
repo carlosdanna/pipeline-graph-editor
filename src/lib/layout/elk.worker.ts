@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
-import ELK from 'elkjs/lib/elk.bundled.js';
 import { fromElkGraph, toElkGraph } from './elk-adapter';
+import { elk, postToHost } from './elk-inline';
 import {
 	resultTransfers,
 	type LayoutRequestMessage,
@@ -18,11 +18,12 @@ import {
  * about what to lay out, and has never heard of "pinned". That all lives on the
  * main thread in incremental.ts, so the code that is awkward to debug across a
  * thread boundary stays as small as it can be.
+ *
+ * Note `postToHost` rather than `self.postMessage`: elk-inline.ts hands
+ * `self.postMessage` to ELK. See that file for why.
  */
 
 declare const self: DedicatedWorkerGlobalScope;
-
-const elk = new ELK();
 
 self.onmessage = async (event: MessageEvent<LayoutRequestMessage>): Promise<void> => {
 	const request = event.data;
@@ -39,7 +40,7 @@ self.onmessage = async (event: MessageEvent<LayoutRequestMessage>): Promise<void
 			...fromElkGraph(laidOut),
 			elkMs
 		};
-		self.postMessage(result, resultTransfers(result));
+		postToHost(result, resultTransfers(result));
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		const failure: WorkerOutbound = {
@@ -48,6 +49,6 @@ self.onmessage = async (event: MessageEvent<LayoutRequestMessage>): Promise<void
 			message,
 			stackOverflow: /call stack|stack size|stack overflow/i.test(message)
 		};
-		self.postMessage(failure);
+		postToHost(failure);
 	}
 };

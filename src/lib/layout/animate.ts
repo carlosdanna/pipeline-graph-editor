@@ -11,8 +11,9 @@ import type { PositionTargets } from './incremental';
  * The animator writes straight into the Float32Arrays of the PositionStore —
  * no allocation per frame, no new graph object, no layout re-run. Svelte cannot
  * see those writes, so callers get an `onFrame(done)` callback and are
- * responsible for triggering a repaint; `done` is true on the final frame, for
- * work that should happen once the graph has settled rather than every frame. In phase 1-2 that means bumping a version counter
+ * responsible for triggering a repaint — which the session does by scheduling a
+ * canvas frame directly. `done` is true on the final frame, for work that should
+ * happen once the graph has settled rather than every frame. In phase 1-2 that means bumping a version counter
  * the SVG depends on; from phase 3 it will just be a canvas redraw, which is
  * what this shape is designed for.
  */

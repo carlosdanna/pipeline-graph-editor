@@ -19,7 +19,10 @@ import {
 import { fullLayoutJob, regionLayoutJob } from '$lib/layout/jobs';
 import { layoutLayered } from '$lib/layout/layered';
 import { DEFAULT_PRESET, INCREMENTAL_OPTIONS, LAYOUT_PRESETS } from '$lib/layout/options';
-import { SVG_NODE_LIMIT } from '$lib/render/limits';
+import { HybridRenderer } from '$lib/render/hybrid-renderer';
+import { DOM_NODE_LIMIT } from '$lib/render/limits';
+import { PerfMonitor } from '$lib/render/perf.svelte';
+import { Viewport } from '$lib/render/viewport';
 
 /**
  * Everything the page knows about the current graph, and every operation that
@@ -32,11 +35,13 @@ import { SVG_NODE_LIMIT } from '$lib/render/limits';
  */
 
 /**
- * Above this many nodes we do not animate, because we do not draw either.
- * Tied to the render limit on purpose: tweening positions nobody can see is
- * pure cost.
+ * Above this many nodes a layout result snaps instead of tweening.
+ *
+ * Tied to the DOM node limit on purpose. Above it, nodes are not drawn at all
+ * yet, and tweening the edges alone would animate a picture with no nodes in
+ * it — motion that explains nothing.
  */
-export const ANIMATE_NODE_LIMIT = SVG_NODE_LIMIT;
+export const ANIMATE_NODE_LIMIT = DOM_NODE_LIMIT;
 
 export type LayoutPhase = 'placeholder' | 'running' | 'done' | 'error';
 
@@ -99,18 +104,21 @@ export class GraphSession {
 	fixture = $state.raw<FixtureState>(buildFixtureState(50));
 	/** Bumped whenever the animator writes into `fixture.positions`. */
 	positionsVersion = $state(0);
-	/**
-	 * Bumped only when the graph has settled. The phase 2 viewport is derived
-	 * from graph bounds, and recomputing it every animation frame would rescale
-	 * the view in lockstep with the nodes — which makes moving nodes look
-	 * stationary, hiding the exact thing the animation exists to show.
-	 */
-	viewVersion = $state(0);
 	layoutPhase = $state<LayoutPhase>('placeholder');
 	layoutError = $state<string | null>(null);
 	lastRun = $state.raw<LayoutRun | null>(null);
 	benchmark = $state.raw<readonly BenchmarkRow[]>([]);
 	benchmarkRunning = $state(false);
+
+	/**
+	 * Viewport and renderer are plain, non-reactive objects: they are read by
+	 * imperative draw code every frame and nothing in a template derives from
+	 * them. The perf monitor is the bridge — it publishes a summary into
+	 * `$state` a few times a second so the HUD can show it.
+	 */
+	readonly viewport = new Viewport();
+	readonly perf = new PerfMonitor();
+	readonly renderer = new HybridRenderer(this.viewport, this.perf);
 
 	#client = new LayoutClient();
 	#animator = new PositionAnimator();
@@ -127,9 +135,11 @@ export class GraphSession {
 		this.#animator.stop();
 		this.fixture = buildFixtureState(size);
 		this.positionsVersion++;
-		this.viewVersion++;
 		this.layoutPhase = 'placeholder';
 		this.lastRun = null;
+		this.perf.layoutMs = null;
+		// Frame the placeholder immediately; the real layout refits when it lands.
+		this.renderer.requestFit();
 		await this.runFullLayout();
 	}
 
@@ -147,6 +157,11 @@ export class GraphSession {
 			if (this.fixture !== state) return;
 
 			this.#apply(fullLayoutTargets(result), state.graph.nodes.length <= ANIMATE_NODE_LIMIT);
+			// A full layout moves everything, so the old viewport is meaningless.
+			// An incremental one deliberately does not refit — moving the view
+			// under someone who just added a node is the opposite of stable.
+			this.renderer.requestFit();
+			this.perf.layoutMs = result.elkMs;
 			this.lastRun = {
 				mode: 'full',
 				nodesLaidOut: job.nodeId.length,
@@ -212,6 +227,7 @@ export class GraphSession {
 			if (this.fixture !== next) return;
 
 			this.#apply(incrementalTargets(result, region, next.positions), true);
+			this.perf.layoutMs = result.elkMs;
 			this.lastRun = {
 				mode: 'incremental',
 				nodesLaidOut: job.nodeId.length,
@@ -269,14 +285,19 @@ export class GraphSession {
 	#apply(targets: PositionTargets, animate: boolean): void {
 		const positions = this.fixture.positions;
 		if (animate) {
-			this.#animator.start(positions, targets, (done) => {
+			// `_done` is unused for now; phase 4 rebuilds the quadtree on it, once
+			// the graph has settled rather than on every tween frame.
+			this.#animator.start(positions, targets, (_done) => {
+				// Schedule the canvas redraw directly rather than waiting for the
+				// version bump to travel through Svelte and back; that would put
+				// the canvas one frame behind the DOM node layer.
+				this.renderer.schedule();
 				this.positionsVersion++;
-				if (done) this.viewVersion++;
 			});
 		} else {
 			snapTo(positions, targets);
+			this.renderer.schedule();
 			this.positionsVersion++;
-			this.viewVersion++;
 		}
 	}
 

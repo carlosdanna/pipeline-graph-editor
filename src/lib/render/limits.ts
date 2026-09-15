@@ -1,16 +1,17 @@
 /**
  * Rendering thresholds, in one place so they can be tuned without hunting.
- *
- * Phases 3 and 5 add the canvas-fallback node count and the semantic-zoom
- * levels here.
  */
 
 /**
- * Above this many nodes the SVG renderer refuses to draw at all.
+ * Above this many nodes, nodes are not rendered as DOM elements.
  *
- * One DOM element per node, per port, per label and per edge stops being
- * viable somewhere in the low hundreds — at the 10k fixture it is ~90,000
- * elements. This is the exhibit that phases 3 and 5 exist to replace, not a
- * safety valve. Raising it is an instructive way to waste thirty seconds.
+ * Phase 3 simply stops drawing them above this count (edges and the grid still
+ * render, and pan/zoom still works, so the canvas cost is measurable at every
+ * fixture size). Phase 5 turns this into the real fallback: above the threshold
+ * nodes get drawn on the canvas instead.
+ *
+ * 2,000 is chosen to be uncomfortable rather than safe — it is roughly where a
+ * transformed DOM layer starts to cost real frame time, which is what makes it
+ * worth watching in the HUD.
  */
-export const SVG_NODE_LIMIT = 600;
+export const DOM_NODE_LIMIT = 2000;

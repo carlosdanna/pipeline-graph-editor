@@ -291,3 +291,196 @@ screenshot.
   bundle), dev-server module transform, and the complete layout/incremental
   logic against real ELK in Node all pass. The rendering itself is unconfirmed
   until phase 9's Playwright tests.
+
+---
+
+## Phase 3 — hybrid renderer
+
+### What landed
+
+```
+src/lib/render/viewport.ts         the one transform; pure arithmetic
+src/lib/render/frame.ts            rAF coalescing
+src/lib/render/scene.ts            grid + edges + ports on canvas
+src/lib/render/edge-buckets.ts     edges grouped by colour, once per graph
+src/lib/render/edge-geometry.ts    rewritten allocation-free
+src/lib/render/hybrid-renderer.ts  canvas + DOM layer, input, DPR, sizing
+src/lib/render/perf.svelte.ts      HUD numbers
+src/lib/components/GraphCanvas.svelte
+src/lib/components/PerfHud.svelte
+src/lib/layout/elk-inline.ts       runs ELK inline in our worker (see below)
+```
+
+`GraphSvg.svelte` is gone.
+
+### d3-zoom vs hand-rolled: hand-rolled
+
+Not a close call, and for one concrete reason rather than a taste argument.
+`d3-zoom` resolves pointer positions through `d3.pointer()`, which calls
+`node.getBoundingClientRect()` on **every event**. Requirement 4 says no layout
+reads inside pointer handlers, and that is exactly a layout read, on the hottest
+path there is.
+
+The hand-rolled version avoids it twice over: panning uses deltas between
+successive events, so it never needs to know where the surface is at all, and
+wheel-zoom uses a surface origin cached by a `ResizeObserver`. `viewport.ts` is
+about 80 lines, touches no DOM, and is pure arithmetic — which is also what made
+it straightforward to verify:
+
+```
+zoom k=0.05..3, factor x0.1..x4, anchors cursor    drift 0.0e+0 (worst 5.7e-14)
+fit 2248x788 / 30029x33553 / 10x10                 centred and contained
+grid step within 24..96 px across the whole range  bounded at 45 lines
+```
+
+`Viewport` is also deliberately **not** reactive. It is written several times
+per frame by pointer handlers and read by imperative draw code; `$state` would
+add proxy overhead to the hottest path and buy nothing, since no template
+derives from it. The perf monitor is the bridge — it publishes a summary into
+`$state` at 5Hz so the HUD can render it.
+
+### What surprised me — the phase 2 worker never worked in a browser
+
+I flagged at the end of phase 2 that I had no browser tooling and the rendering
+was unverified. It turns out the *worker* was broken too, and every measurement
+I took was from an environment that cannot expose it.
+
+The dev-server log had been collecting, once per page load:
+
+```
+TypeError: _Worker is not a constructor
+```
+
+Root cause: `elkjs/lib/elk.bundled.js` is browserified from elkjs's **Node**
+entry point — its own package.json says so
+(`browserify build/js/main-node.js ... --outfile lib/elk.bundled.js`). That
+entry's constructor does:
+
+```js
+const Worker = require('./elk-worker.min.js').Worker;
+workerFactory = (url) => new Worker(url);
+```
+
+and `elk-worker.min.js` only exports `.Worker` when `self` is undefined. When
+`self` exists it assumes it is being loaded *as* the worker script, installs
+`self.onmessage`, and exports nothing. So the factory calls `new undefined()`.
+
+**Node has no `self`.** That single fact is why four rounds of benchmarking, an
+end-to-end incremental-layout verification at 10,000 nodes, a clean typecheck
+and a clean production build all passed while the app could not lay out a single
+graph in a browser. The environment I could measure in was the only environment
+where the bug does not exist.
+
+I reproduced it deliberately before fixing it, by defining `self` in Node:
+
+```
+global present, no self/Worker  ->  ok
+global present + self + Worker  ->  FAILED: _Worker is not a constructor
+no global, self, no Worker      ->  FAILED: _Worker is not a constructor
+```
+
+The fix (`elk-inline.ts`) stops fighting elk-worker's self-installation and uses
+it: let it install its handler on our worker scope, take that handler, hand it
+back to `elk-api` wrapped in a worker-shaped object via the **public**
+`workerFactory` option, and let elk-api drive its own protocol across it. No
+second thread, no nested worker, and no message shapes reverse-engineered from
+elkjs internals. The one subtlety is that ELK replies by calling
+`self.postMessage`, so that function now belongs to ELK and our worker replies
+through a `postToHost` handle captured before the swap.
+
+Verified by driving the real `elk.worker.ts` through the real protocol inside
+the reproduction scope:
+
+```
+n=   50  ok   returned 50/50    elk  67ms  extent  2161x758
+n=  500  ok   returned 500/500  elk 148ms  extent  5478x3875
+n= 2000  ok   returned 2000/2000 elk 595ms extent 10374x10588
+```
+
+595ms at 2,000 against 632ms through the old path — the inline route costs
+nothing. The 10k incremental check still reports **0 of 10,000 existing nodes
+moved, max drift 0**.
+
+**The lesson I am taking from this**: "verified everywhere except the target
+environment" is much closer to "unverified" than the amount of green output
+suggested. The first thing phase 9 should test is the worker, and the technique
+is cheap — define `self` on `globalThis` in Node and the browser code path
+becomes reachable. That single shim turns an unreachable class of bug into an
+ordinary unit test.
+
+### Canvas decisions
+
+**Batch by colour, not by edge.** `strokeStyle` is a canvas state change, and
+the naive loop (begin path, set colour, stroke — per edge) costs ~14,700 stroke
+calls per frame at 10k. Grouping edges by data type into `Int32Array` buckets
+once per graph, then accumulating one path per colour, costs four. Measured
+draw-call counts per frame, with a stub context:
+
+| fixture | beziers | strokes | fills | port rects |
+|---------|---------|---------|-------|------------|
+| 50      | 79      | 5       | 4     | 119        |
+| 500     | 738     | 5       | 4     | 1,246      |
+| 2,000   | 2,944   | 5       | 4     | 4,958      |
+| 10,000  | 14,739  | 5       | 4     | 24,800     |
+
+Five and four, flat, at every size. (The fifth stroke is the grid.)
+
+**Edge geometry is allocation-free.** The phase 1 API returned
+`{from, to, c1, c2}` — five objects per edge, so ~74,000 short-lived objects per
+frame at 10k. Rewritten to fill one reused struct. The cost of allocating is not
+really the allocating; it is the GC pauses, which appear as exactly the frame
+spikes the HUD exists to catch.
+
+**Ports are drawn on the canvas, not on the node elements.** An edge endpoint
+and the dot it lands on are the same geometry, and drawing them from the same
+numbers is the only way to guarantee they never disagree. It also removes ~4
+elements from every node — 8,000 fewer DOM nodes at the 2,000-node fixture.
+
+**JavaScript cost per frame** (our code only — rasterisation is the browser's
+and is *not* included; these are a floor, not a frame time):
+
+| fixture | zoom (fit) | median | p90    |
+|---------|-----------|--------|--------|
+| 50      | 0.669     | 0.06ms | 0.15ms |
+| 500     | 0.196     | 0.16ms | 0.28ms |
+| 2,000   | 0.071     | 0.79ms | 0.90ms |
+| 10,000  | 0.024     | 3.44ms | 4.41ms |
+
+3.44ms of a 16.7ms budget at 10k, before the browser rasterises a single pixel —
+and every bit of it is currently uncullable. That is phase 5's whole case.
+
+**The DOM layer transform is written in the same rAF callback as the canvas
+draw.** If the layer were positioned through Svelte's reactivity it could land a
+frame after the canvas, and nodes would visibly lag their own edges during a
+pan. Putting both writes in one callback makes that impossible by construction —
+it is the main reason `HybridRenderer` is a class rather than logic in the
+component.
+
+**The node layer is `pointer-events: none`.** All interaction goes through the
+surface and, from phase 4, the quadtree — never through a node's own event
+target. That keeps the interaction model identical whether nodes happen to be
+DOM elements or canvas pixels, which matters a lot once phase 5 makes that
+switch at runtime.
+
+### Smaller things
+
+- `MIN_ZOOM` is nearly binding at 10k: fitting a 30,029 x 33,553 graph into a
+  1440x820 viewport needs k = 0.0216 against a floor of 0.02. Worth remembering
+  before lowering the floor for any reason.
+- The HUD publishes at 5Hz rather than per frame. An instrument that re-renders
+  60 times a second is itself a workload and would partly be measuring its own
+  cost.
+- `viewVersion` from phase 2 is deleted. It existed to stop the SVG viewBox
+  rescaling mid-tween; the canvas renderer owns framing now, so it was dead.
+- Grid spacing subdivides by 4 to stay between 24 and 96 screen pixels, which
+  also bounds the line count at ~45 however far out you zoom. `gridStep` is
+  exported purely so that bound can be checked without a canvas — an unbounded
+  loop there would hang the frame rather than merely look wrong.
+
+### Not verified
+
+Still no browser tooling in this session, so I have not seen a frame rendered.
+What *is* now verified, which was not before: the worker runs ELK correctly in a
+browser-shaped scope, end to end, through the real protocol. The HUD numbers —
+actual FPS, actual frame time including rasterisation — can only come from your
+browser.

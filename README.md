@@ -14,11 +14,14 @@ npm run check    # svelte-check + tsc
 
 Decisions and measurements are logged per phase in [NOTES.md](./NOTES.md).
 
-## Current state: phase 2 — layout worker
+## Current state: phase 3 — hybrid renderer
 
 Fixture generator producing DAG-shaped pipelines at 50 / 500 / 2,000 / 10,000
-nodes, a structural validator, and ELK layout running in a dedicated Web Worker.
-Adding a stage lays out only the region around it and provably moves no existing
-node. Rendering is still the deliberately naive SVG, capped at 600 nodes.
+nodes, a structural validator, ELK layout in a dedicated Web Worker with stable
+incremental layout, and a hybrid renderer: grid and edges on a canvas, nodes as
+DOM elements in a CSS-transformed layer, both driven by one transform. Pan with
+drag, zoom with the wheel. A perf HUD reports FPS, frame time, visible vs total
+nodes and the last layout duration.
 
-No canvas, no pan/zoom, no interaction yet.
+Nodes are drawn up to 2,000; above that the canvas still renders edges and the
+grid. No culling, no selection, no interaction beyond pan/zoom yet.
