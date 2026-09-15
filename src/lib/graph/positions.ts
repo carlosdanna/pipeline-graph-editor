@@ -37,6 +37,20 @@ export class PositionStore {
 		this.y[index] = y;
 	}
 
+	/**
+	 * A copy sized for `count` nodes, keeping whatever overlaps.
+	 *
+	 * Node indices are append-only — adding a node never renumbers an existing
+	 * one — so growing is a straight prefix copy and every position survives.
+	 */
+	resized(count: number): PositionStore {
+		const copy = new PositionStore(count);
+		const keep = Math.min(count, this.count);
+		copy.x.set(this.x.subarray(0, keep));
+		copy.y.set(this.y.subarray(0, keep));
+		return copy;
+	}
+
 	clone(): PositionStore {
 		const copy = new PositionStore(this.count);
 		copy.x.set(this.x);

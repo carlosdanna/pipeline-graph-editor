@@ -25,13 +25,26 @@
 		index: GraphIndex;
 		positions: PositionStore;
 		dynamics: readonly NodeDynamics[];
+		/**
+		 * Positions live in Float32Arrays that the layout animator writes into
+		 * directly, which Svelte cannot observe. These counters are the signal
+		 * that it happened: `geometryVersion` every frame, `viewVersion` only
+		 * once the graph has settled.
+		 *
+		 * This is a stopgap, and an expensive one — every bump rebuilds two
+		 * arrays of strings for the whole graph. It is precisely what phase 3
+		 * removes by drawing to a canvas, where a redraw is just a redraw.
+		 */
+		geometryVersion: number;
+		viewVersion: number;
 	}
 
-	let { graph, index, positions, dynamics }: Props = $props();
+	let { graph, index, positions, dynamics, geometryVersion, viewVersion }: Props = $props();
 
 	const PADDING = 80;
 
 	const viewBox = $derived.by(() => {
+		void viewVersion;
 		const b = graphBounds(graph, positions);
 		return [
 			b.x - PADDING,
@@ -41,16 +54,22 @@
 		].join(' ');
 	});
 
-	const edgePaths = $derived.by(() =>
-		graph.edges.map((edge, i) => {
+	const edgePaths = $derived.by(() => {
+		void geometryVersion;
+		return graph.edges.map((edge, i) => {
 			const geometry = edgeGeometry(graph, index, positions, i);
 			return {
 				id: edge.id,
 				d: geometry ? bezierPathData(geometry) : '',
 				color: DATA_TYPE_COLOR[edge.dataType]
 			};
-		})
-	);
+		});
+	});
+
+	const nodeTransforms = $derived.by(() => {
+		void geometryVersion;
+		return graph.nodes.map((_, i) => `translate(${positions.x[i]},${positions.y[i]})`);
+	});
 </script>
 
 <svg {viewBox} role="img" aria-label="Pipeline graph, static phase 1 render">
@@ -64,7 +83,7 @@
 	<g class="nodes">
 		{#each graph.nodes as node, i (node.id)}
 			{@const status = dynamics[i].status}
-			<g transform="translate({positions.x[i]},{positions.y[i]})">
+			<g transform={nodeTransforms[i]}>
 				<rect
 					width={node.width}
 					height={node.height}
