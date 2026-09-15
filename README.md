@@ -1,82 +1,131 @@
 # Pipeline graph editor
 
-A prototype graph/canvas editor for streaming data pipelines, built to explore
-where this class of UI gets hard at scale. Performance characteristics matter
-more here than features or polish.
+A prototype graph/canvas editor for streaming data pipelines — pipeline stages
+(source / transform / filter / aggregate / sink) joined by typed data flows, with
+a status and throughput per stage that change constantly while the graph
+structure stays almost still.
 
-SvelteKit (SPA, `adapter-static`, `ssr = false`) + Svelte 5 runes + TypeScript strict.
+Built to explore **where this class of UI gets hard at scale**. Performance
+characteristics matter more here than features or polish, and the interesting
+parts are the architectural ones: what goes on a canvas versus in the DOM, how
+layout stays stable, and how 200 telemetry updates a second cost almost nothing.
+
+SvelteKit (SPA, `adapter-static`, `ssr = false`) · Svelte 5 runes · TypeScript
+strict · `elkjs` · `d3-quadtree`
+
+---
+
+## Quick start
 
 ```bash
-npm run dev      # dev server
-npm run build    # static SPA into build/
-npm run check    # svelte-check + tsc
-npm test         # Vitest: pure logic in Node, components in jsdom
-npm run test:e2e # Playwright against the production build
-npm run bench    # measurement scripts behind the numbers in NOTES.md
+npm install
+npm run dev
 ```
 
-Decisions and measurements are logged per phase in [NOTES.md](./NOTES.md).
+Then pick a fixture size in the header — 50, 500, 2,000 or 10,000 nodes — and
+press **▶ start feed** to turn on the telemetry stream. The HUD in the top right
+reports what it is costing.
 
-## Current state: phase 9 — tests
+```bash
+npm run build      # static SPA into build/
+npm run check      # svelte-check + tsc
+npm test           # Vitest — 189 tests, ~3 s
+npm run test:e2e   # Playwright against the production build
+npm run bench      # the measurement scripts behind the numbers in docs/
+```
 
-Fixture generator producing DAG-shaped pipelines at 50 / 500 / 2,000 / 10,000
-nodes, a structural validator, ELK layout in a dedicated Web Worker with stable
-incremental layout, and a hybrid renderer: grid and edges on a canvas, nodes as
-DOM elements in a CSS-transformed layer, both driven by one transform. Pan with
-drag, zoom with the wheel. A perf HUD reports FPS, frame time, visible vs total
-nodes and the last layout duration.
+`npm run test:e2e` needs `npx playwright install chromium` once.
 
-Interaction: a `d3-quadtree` over node bounds for picking, distance-to-bezier
-edge picking with a zoom-aware tolerance, click and shift-click selection,
-shift-drag marquee, and node dragging with edges following live.
+---
 
-| gesture | |
+## Documentation
+
+| | |
 |---|---|
-| drag empty space | pan |
-| wheel | zoom toward the cursor |
-| click node / edge | select |
-| shift-click | toggle |
-| shift-drag empty space | marquee, added to the selection |
-| drag a node | move the selection |
-| middle-drag | pan, always |
+| **[docs/architecture.md](./docs/architecture.md)** | How it is built and why. Start here. |
+| **[docs/performance.md](./docs/performance.md)** | Every measurement, with its methodology. |
+| **[docs/learnings.md](./docs/learnings.md)** | What turned out to be wrong. The most useful one. |
+| **[docs/limitations.md](./docs/limitations.md)** | What does not work, and what to consider next. |
+| **[docs/testing.md](./docs/testing.md)** | The three testing layers and what each is for. |
+| [NOTES.md](./NOTES.md) | The chronological build log, one section per phase. |
 
-Everything off screen is culled, and detail is a function of zoom: below 0.5
-labels and ports are dropped for plain boxes, below 0.25 nodes become dots and
-edges straight lines. Nodes leave the DOM for the canvas above 2,000 of them or
-below the full detail tier — every gesture keeps working either way, because
-nothing goes through a node element.
+---
 
-Zoomed in at 10,000 nodes this is a 10x reduction in per-frame JavaScript
-(1.98 ms to 0.20 ms); zoomed out it is 2.1x, all of it semantic zoom. The `cull`
-and `semantic zoom` checkboxes turn each off so the HUD shows the difference
-live.
+## What it does
 
-A mock telemetry feed drives status and throughput at 200 to 20,000 updates a
-second (`▶ start feed`). Updates write straight into typed arrays; only the
-notification is batched, into one flush per frame. A node updated fifty times
-between frames is notified once, an off-screen update schedules nothing, and
-while nodes are DOM elements the canvas is not touched at all. At 10,000 nodes
-zoomed in, 260 updates a second produce two canvas redraws.
+**Rendering.** Grid, edges, ports and selection on one canvas; nodes as DOM
+elements in a CSS-transformed layer above it — both moved by one transform
+written in the same animation frame. Above 2,000 nodes, or below 0.5 zoom, nodes
+move to the canvas too. Every gesture keeps working across that switch, because
+nothing has ever gone through a node element.
 
-A resizable bottom pane lists every stage, virtualized: about twenty rows exist
-as elements whether the list holds a hundred or a million, and each row
-subscribes to its own node, so a streaming update repaints one row. Selection is
-bidirectional — clicking a row selects it and pans the canvas there, and
-selecting on the canvas scrolls the list to it.
+**Layout.** ELK in a dedicated Web Worker, never on the main thread. Adding a
+stage lays out a dirty region of ~6 nodes rather than the whole graph, and
+**moves no existing node by even a subpixel** — verified at 10,000 nodes.
 
-A parallel off-screen DOM tree describes what is drawn, with real ARIA roles and
-labels; the canvas and the node layer are hidden from assistive technology so
-each stage is announced once. Arrow keys move between connected stages (left and
-right follow the flow, up and down walk the layer), Enter selects, Escape
-clears, `+`/`-` zoom and `0` fits. The table has its own row navigation, sharing
-one focused node with the graph. Arrow navigation reaches 100% of stages at
-every fixture size and retraces exactly.
+**Culling and semantic zoom.** Everything off screen is skipped. Below 0.5 zoom
+labels and ports go; below 0.25 nodes become dots and edges straight lines.
 
-Tested with Vitest (189 tests — pure logic in Node, components in jsdom) and
-Playwright (22 tests against the production build, including a frame-budget
-assertion at 2,000 and 10,000 nodes). `tools/` holds the benchmark scripts
-behind the numbers in NOTES.md.
+**Interaction.** A `d3-quadtree` over node bounds, distance-to-bezier edge
+picking with a zoom-aware tolerance, click / shift-click / marquee selection, and
+node dragging with edges following live.
 
-**Known limitation:** ELK cannot lay out the 10,000-node fixture in a browser —
-it overflows the worker's stack. That fixture falls back to the placeholder
-layered layout, which everything else works on normally. See NOTES.md, phase 9.
+**Streaming.** A mock feed at 200–20,000 updates a second. Values are written
+straight into typed arrays; only the *notification* is batched, into one flush
+per frame.
+
+**Table pane.** Every stage, virtualized — about twenty rows exist as elements
+whether the list holds a hundred or a million. Selection is bidirectional with
+the canvas.
+
+**Accessibility.** A parallel off-screen DOM tree with real ARIA roles and
+labels, kept in step with what is drawn. Full keyboard operation.
+
+### Controls
+
+| gesture | | key | |
+|---|---|---|---|
+| drag empty space | pan | arrows | move between connected stages |
+| wheel | zoom toward cursor | enter | select focused stage |
+| click | select node or edge | shift+enter | add to selection |
+| shift-click | toggle | escape | clear selection |
+| shift-drag empty space | marquee | `+` / `-` | zoom |
+| drag a node | move the selection | `0` | fit to screen |
+| middle-drag | pan, always | tab | into the graph, then the table |
+
+---
+
+## The headline numbers
+
+Per-frame JavaScript at 10,000 nodes (14,739 edges), culling and semantic zoom
+off versus on:
+
+| | off | on | |
+|---|---|---|---|
+| zoomed in (1.0x) | 1.98 ms | **0.20 ms** | 10x — almost all culling |
+| fit to screen (0.021x) | 1.61 ms | **0.77 ms** | 2.1x — all semantic zoom |
+
+A 200/second telemetry feed over that graph, zoomed in, produces **two canvas
+redraws per second**: 81 of 10,000 nodes are on screen, so ~99% of updates write
+two array slots and schedule nothing.
+
+Batching 20,000 updates a second costs **0.029 ms per frame** — 0.2% of a 16.7 ms
+budget.
+
+Real browser frame times during a sustained pan: **0.3 ms at 2,000 nodes**,
+**1.3 ms at 10,000**.
+
+Full tables and methodology in [docs/performance.md](./docs/performance.md) —
+including what these numbers deliberately do *not* include.
+
+---
+
+## Known limitation
+
+**ELK cannot lay out the 10,000-node fixture in a browser.** It overflows the
+worker's stack, warm and on retry. That fixture falls back to the placeholder
+layered layout, which everything else works on normally — the header will show
+`layout failed`. Every 10k layout timing in these docs was measured in Node.
+
+Details and the options for fixing it are in
+[docs/limitations.md](./docs/limitations.md#elk-cannot-lay-out-10000-nodes-in-a-browser).
