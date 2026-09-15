@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import GraphCanvas from '$lib/components/GraphCanvas.svelte';
 	import PerfHud from '$lib/components/PerfHud.svelte';
+	import TablePane from '$lib/components/TablePane.svelte';
 	import { FIXTURE_SIZES, type FixtureSize } from '$lib/graph/generate';
 	import { GraphSession } from '$lib/state/session.svelte';
 	import { UPDATE_RATES } from '$lib/stream/source';
@@ -25,7 +26,7 @@
 
 <div class="app">
 	<header>
-		<h1>Pipeline graph editor <span class="phase">phase 6 — streaming updates</span></h1>
+		<h1>Pipeline graph editor <span class="phase">phase 7 — table pane</span></h1>
 
 		<span class="status" data-phase={session.layoutPhase}>
 			{#if session.layoutPhase === 'running'}
@@ -147,7 +148,7 @@
 
 	<p class="hint">
 		drag to pan · wheel to zoom · click a node or edge to select · shift-click to toggle ·
-		shift-drag empty space to marquee · drag a node to move it
+		shift-drag empty space to marquee · drag a node to move it · click a row to pan to it
 
 		<span class="toggles">
 			<!--
@@ -187,6 +188,13 @@
 		/>
 		<PerfHud perf={session.perf} stream={session.stream} />
 	</main>
+
+	<TablePane
+		graph={state.graph}
+		dynamics={session.dynamics}
+		selection={session.selection}
+		onselect={(index, additive) => session.selectFromTable(index, additive)}
+	/>
 </div>
 
 <style>

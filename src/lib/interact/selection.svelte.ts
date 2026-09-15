@@ -32,6 +32,21 @@ export class SelectionStore {
 	edgeCount = $state(0);
 
 	/**
+	 * Bumped on every change, including ones that leave the counts alone.
+	 *
+	 * Needed from phase 7, because the table pane has to re-read the flags when
+	 * the selection changes and the counts are not a sufficient signal: clicking
+	 * node A and then node B leaves `nodeCount` at 1 throughout while the
+	 * selected node is different. Same shape as `positionsVersion` — bulk data
+	 * stays in typed arrays, one counter tells Svelte it moved.
+	 *
+	 * This is the only reactivity a marquee touches: one signal write per frame,
+	 * which the ~40 visible table rows derive from. The canvas still reads the
+	 * flags directly and is unaffected.
+	 */
+	version = $state(0);
+
+	/**
 	 * The most recently picked node, or -1. Distinct from "the selection" so a
 	 * multi-select still has a subject — phase 7 pans the table to it, phase 8
 	 * navigates outward from it with the arrow keys.
@@ -61,6 +76,7 @@ export class SelectionStore {
 			this.edgeFlags = next;
 		}
 		this.#recount();
+		this.version++;
 	}
 
 	hasNode(index: number): boolean {
@@ -74,6 +90,7 @@ export class SelectionStore {
 		this.nodeCount = 0;
 		this.edgeCount = 0;
 		this.primaryNode = -1;
+		this.version++;
 	}
 
 	/** Selects one node, replacing the selection unless `additive`. */
@@ -89,6 +106,7 @@ export class SelectionStore {
 			this.nodeCount++;
 		}
 		this.primaryNode = index;
+		this.version++;
 	}
 
 	/** Adds or removes one node. The shift-click path. */
@@ -102,6 +120,7 @@ export class SelectionStore {
 			this.nodeCount++;
 			this.primaryNode = index;
 		}
+		this.version++;
 	}
 
 	selectEdge(index: number, additive = false): void {
@@ -116,6 +135,7 @@ export class SelectionStore {
 			this.edgeFlags[index] = 1;
 			this.edgeCount++;
 		}
+		this.version++;
 	}
 
 	/**
@@ -140,6 +160,7 @@ export class SelectionStore {
 		for (let i = 0; i < this.nodeFlags.length; i++) count += this.nodeFlags[i];
 		if (this.nodeCount !== count) this.nodeCount = count;
 		if (this.primaryNode >= 0 && this.nodeFlags[this.primaryNode] !== 1) this.primaryNode = -1;
+		this.version++;
 	}
 
 	/** Replaces the selected edges wholesale. The second half of a marquee frame. */
@@ -147,6 +168,7 @@ export class SelectionStore {
 		this.edgeFlags.fill(0);
 		for (const e of edges) this.edgeFlags[e] = 1;
 		if (this.edgeCount !== edges.length) this.edgeCount = edges.length;
+		this.version++;
 	}
 
 	/** The selected node indices, as a fresh array. Called once per drag, not per frame. */

@@ -204,6 +204,20 @@ export class HybridRenderer {
 		this.schedule();
 	}
 
+	/**
+	 * Centres the view on a point in graph space, keeping the current zoom.
+	 *
+	 * Zoom is deliberately left alone: the table pane calls this when a row is
+	 * clicked, and rescaling the view as well would lose the frame of reference
+	 * the user built up by zooming there in the first place.
+	 */
+	centreOn(graphX: number, graphY: number): void {
+		if (this.#cssWidth === 0) this.#measure();
+		this.viewport.x = this.#cssWidth / 2 - graphX * this.viewport.k;
+		this.viewport.y = this.#cssHeight / 2 - graphY * this.viewport.k;
+		this.schedule();
+	}
+
 	/** Frame a specific region. Used by "fit selection". */
 	fitTo(bounds: Rect): void {
 		if (this.#cssWidth === 0) this.#measure();

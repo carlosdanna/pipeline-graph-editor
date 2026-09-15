@@ -15,7 +15,7 @@ npm run verify   # headless logic checks, see tools/
 
 Decisions and measurements are logged per phase in [NOTES.md](./NOTES.md).
 
-## Current state: phase 6 — streaming updates
+## Current state: phase 7 — table pane
 
 Fixture generator producing DAG-shaped pipelines at 50 / 500 / 2,000 / 10,000
 nodes, a structural validator, ELK layout in a dedicated Web Worker with stable
@@ -55,3 +55,9 @@ notification is batched, into one flush per frame. A node updated fifty times
 between frames is notified once, an off-screen update schedules nothing, and
 while nodes are DOM elements the canvas is not touched at all. At 10,000 nodes
 zoomed in, 260 updates a second produce two canvas redraws.
+
+A resizable bottom pane lists every stage, virtualized: about twenty rows exist
+as elements whether the list holds a hundred or a million, and each row
+subscribes to its own node, so a streaming update repaints one row. Selection is
+bidirectional — clicking a row selects it and pans the canvas there, and
+selecting on the canvas scrolls the list to it.

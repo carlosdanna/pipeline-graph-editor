@@ -1064,3 +1064,145 @@ than my intentions.
 - A status change still repaints the canvas during a layout tween or a drag,
   when the canvas is redrawing every frame anyway. Harmless, but the `repaints`
   number over-attributes to the feed in those moments.
+
+---
+
+## Phase 7 — table pane
+
+### What landed
+
+```
+src/lib/render/virtual.ts             windowing arithmetic, pure
+src/lib/components/TablePane.svelte   resizable pane, scroller, resize handle
+src/lib/components/NodeRow.svelte     one row, one subscription
+```
+
+`selection.svelte.ts` gained a `version` counter. `hybrid-renderer.ts` gained
+`centreOn`. The session gained `selectFromTable` and `revealNode`.
+
+### The 100,000-row requirement
+
+The brief asks that 100,000 rows scroll smoothly. The largest fixture is 10,000,
+because ELK takes 4.6 seconds on that and 100,000 is not a layout it can do at
+all. So the number is checked where it is actually a claim about this code — the
+windowing arithmetic, which has to be independent of row count:
+
+| rows       | `windowFor` | rows rendered |
+|------------|-------------|---------------|
+| 1,000      | 0.023 µs    | 22            |
+| 10,000     | 0.009 µs    | 22            |
+| 100,000    | 0.021 µs    | 22            |
+| 1,000,000  | 0.015 µs    | 22            |
+
+Constant, in both columns, across four orders of magnitude. The app cannot show
+you 100,000 stages, but the list is not what stops it.
+
+### Decisions
+
+**Fixed row height.** The load-bearing assumption: it makes "which rows are
+visible" O(1) arithmetic rather than a cumulative-offset structure that has to
+be maintained as rows change. Variable heights would need a prefix-sum tree and
+a measurement pass and would buy nothing — every row holds the same four fields.
+`ROW_HEIGHT` is defined once and applied as an inline style; the CSS is not
+allowed a second opinion, because a one-pixel disagreement between the
+arithmetic and the rendering accumulates into a whole row of drift a few
+thousand down the list.
+
+**The browser does the scrolling.** One empty spacer sized to the full list
+gives the scrollbar its range; rows are absolutely positioned inside it. We only
+answer "which rows are those". No transform tricks, no synthetic scrollbar, and
+the result is a scroll that feels native because it is.
+
+**Scroll events are coalesced into one frame**, with the same `FrameScheduler`
+the pointer handlers use. A flick delivers scroll events faster than the display
+refreshes; reading `scrollTop` once per frame is both cheaper and the only way
+the rendered window can be consistent with what is painted.
+
+**`scrollToIndex` returns null when the row is already visible.** This is the
+whole of the bidirectional-selection problem, and it took one line rather than a
+mechanism. The obvious implementation is an `isSyncing` boolean guarding a
+feedback loop — table click sets selection, selection effect scrolls table,
+scroll changes window, and so on. Making the function *idempotent* instead means
+there is no loop to guard: clicking a row cannot make the list jump, because the
+row you clicked is by definition visible. Verified by sweeping every clickable
+row at every scroll position over a 100,000-row list — zero would have scrolled.
+
+**The table needed no new streaming code at all.** A row calls
+`dynamics.view(index)`, which is the same per-node cell the canvas nodes use. A
+node that is on screen *in the table* gets a cell exactly the way one on the
+canvas does, and a status change repaints one row out of the forty rendered.
+This was the moment phase 6's design paid for itself: the second consumer cost
+nothing.
+
+### What surprised me
+
+**The table is the first thing that needed selection to be reactive, and that
+partly walks back a phase 4 claim.** Phase 4's notes say a marquee "touches
+Svelte's reactivity zero times". That was true when only the canvas cared. The
+table has to re-read the flags when the selection changes, and the counts are
+not a sufficient signal — clicking node A and then node B leaves `nodeCount` at
+1 throughout while the selected node is different. So `SelectionStore` now has a
+`version` counter bumped on every mutation.
+
+Honest accounting of what that costs: a marquee now performs **one signal write
+per frame** (two, counting the edge pass), from which about forty visible row
+derivations re-run. The canvas is unaffected and still reads the flag arrays
+directly. So the phase 4 claim should now read "a marquee touches one signal and
+the visible rows", which is still the point — it is not 2,000 class bindings —
+but it is no longer zero, and it is worth saying so rather than letting the old
+sentence stand.
+
+**Centring beats scrolling minimally.** First version scrolled the least
+distance needed, which puts the selected row flush against the top or bottom
+edge — exactly where the eye does not look, so selecting on the canvas appeared
+to do nothing to the table. Centring made the link obvious. A UI decision, but
+the reason it was wrong was mechanical: the row was visible and I still could
+not see it.
+
+**The ARIA structure forced the markup, not the other way round.** A virtualized
+grid has a scroll container between the grid and its rows, which breaks the
+required `grid > rowgroup > row` chain. Marking the scroller `role="presentation"`
+fixes it, and `aria-rowcount` reports the *full* list rather than the rendered
+window — which is the entire contract of a virtualized grid, and the thing that
+tells a screen reader it is on row 4,000 of 10,000 rather than row 12 of 22.
+Svelte's a11y checker also caught `role="grid"` on a `<section>`, which was a
+real error: the pane holds a resize separator and a footer, and a grid whose
+children include a separator is a lie. The role moved to an inner element.
+
+### Verified
+
+`npm run verify:table` — 28 checks, all pure arithmetic, no DOM.
+
+The important one is a coverage invariant rather than a spot check: **every row
+whose pixels fall inside the viewport must be inside the rendered range.** A gap
+there is a blank row on screen. Swept at five list sizes, stepping by a prime so
+the sweep lands off row boundaries as well as on:
+
+```
+rows=      1      15 scroll positions, 0 gaps, 0 out of range
+rows=      7      15 scroll positions, 0 gaps, 0 out of range
+rows=     37     107 scroll positions, 0 gaps, 0 out of range
+rows=   1000   3,409 scroll positions, 0 gaps, 0 out of range
+rows= 100000 342,838 scroll positions, 0 gaps, 0 out of range
+```
+
+Plus the edges that are easy to get wrong and invisible when you do: an empty
+list, a viewport that has not been measured yet, a list shorter than the
+viewport, a negative `scrollTop` (macOS overscroll bounce reports one), and a
+`scrollTop` past the end (a resize can leave one for a frame).
+
+### Known limitations, carried forward
+
+- Clicking a row pans instantly. A short viewport tween would make the link
+  easier to follow at 10,000 nodes, where the jump can be most of the graph
+  away, but it is machinery this phase did not need.
+- No sorting or filtering. Not asked for, and both would break the assumption
+  that row index equals node index, which is what makes `scrollToIndex` and the
+  selection flags line up without a mapping layer.
+- The row's `grid-template-columns` is duplicated between the header and the
+  row. Cosmetic only — a mismatch misaligns columns, it does not corrupt
+  anything — but it is the same class of duplication as the row height, which I
+  did fix.
+- Keyboard navigation of the list is phase 8. Rows carry `tabindex="-1"` and
+  respond to Enter and Space, but nothing moves focus between them yet, and the
+  resize handle cannot be driven from the keyboard.

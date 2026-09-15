@@ -484,6 +484,33 @@ export class GraphSession implements InteractionHost {
 		this.#rebuildTree();
 	}
 
+	/**
+	 * A row was clicked in the table.
+	 *
+	 * Half of the bidirectional selection: this selects and pans. The other half
+	 * needs no code here at all — the table watches `selection.primaryNode`,
+	 * which the canvas already sets, so picking on the canvas scrolls the list.
+	 */
+	selectFromTable(index: number, additive: boolean): void {
+		if (additive) this.selection.toggleNode(index);
+		else this.selection.selectNode(index, false);
+
+		// Panning to a node that was just deselected would be confusing.
+		if (this.selection.hasNode(index)) this.revealNode(index);
+		this.renderer.schedule();
+	}
+
+	/** Centres the viewport on one node, without changing zoom. */
+	revealNode(index: number): void {
+		const state = this.fixture;
+		const node = state.graph.nodes[index];
+		if (!node) return;
+		this.renderer.centreOn(
+			state.positions.x[index] + node.width / 2,
+			state.positions.y[index] + node.height / 2
+		);
+	}
+
 	/** Frames the current selection, or the whole graph if nothing is selected. */
 	fitSelection(): void {
 		const state = this.fixture;
