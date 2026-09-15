@@ -1,5 +1,6 @@
+import type { DynamicsStore } from '$lib/graph/dynamics.svelte';
 import { graphBounds, type PositionStore } from '$lib/graph/positions';
-import type { NodeDynamics, PipelineGraph, Rect } from '$lib/graph/types';
+import type { PipelineGraph, Rect } from '$lib/graph/types';
 import type { SelectionStore } from '$lib/interact/selection.svelte';
 import { cullNodes, viewRectFor, type ViewRect } from './cull';
 import type { EdgeAnchors } from './edge-anchors';
@@ -43,7 +44,7 @@ import { WHEEL_ZOOM_RATE, type Viewport } from './viewport';
 
 export interface Scene {
 	readonly graph: PipelineGraph;
-	readonly dynamics: readonly NodeDynamics[];
+	readonly dynamics: DynamicsStore;
 	readonly positions: PositionStore;
 	readonly buckets: EdgeBuckets;
 	readonly anchors: EdgeAnchors;
@@ -124,17 +125,53 @@ export class HybridRenderer {
 	 * never shrunk, so a pan allocates nothing.
 	 */
 	#cullBuffer = new Int32Array(0);
+	#visibleCount = 0;
+
+	/**
+	 * 1 while a node is inside the cull region, parallel to `graph.nodes`.
+	 *
+	 * The culled list answers "what do I draw"; this answers "is *this* node on
+	 * screen", which is the question the streaming batcher asks once per update.
+	 * Maintained by clearing the previous frame's entries and setting the new
+	 * ones, so it costs O(visible) rather than a full clear.
+	 */
+	#visibleFlags = new Uint8Array(0);
 
 	// Both default on. They exist so the phase 5 numbers can be compared against
 	// the phase 4 ones live, in the HUD, rather than only in a table.
 	#cullingEnabled = true;
 	#semanticZoomEnabled = true;
 
+	/** Whether the last frame drew node bodies. See `repaintNodes`. */
+	#nodesOnCanvas = false;
+
 	constructor(viewport: Viewport, perf: PerfMonitor, visible: VisibleNodes) {
 		this.viewport = viewport;
 		this.#perf = perf;
 		this.#visible = visible;
 		this.#scheduler = new FrameScheduler((now) => this.#draw(now));
+	}
+
+	/** Whether a node is currently on screen. Read by the streaming batcher. */
+	isVisible(nodeIndex: number): boolean {
+		return this.#visibleFlags[nodeIndex] === 1;
+	}
+
+	/**
+	 * A visible node's appearance changed. Returns whether a canvas frame was
+	 * actually needed.
+	 *
+	 * The answer is no whenever the DOM owns the nodes, because nothing the
+	 * canvas draws depends on status or throughput — edges are coloured by data
+	 * type, ports by port type, selection rings by selection. So while nodes are
+	 * elements, a status change costs the canvas exactly nothing, which is
+	 * requirement 3 read literally. Above the node limit, or below the full
+	 * detail tier, the canvas owns the bodies and has to redraw.
+	 */
+	repaintNodes(): boolean {
+		if (!this.#nodesOnCanvas) return false;
+		this.schedule();
+		return true;
 	}
 
 	setCulling(enabled: boolean): void {
@@ -393,7 +430,12 @@ export class HybridRenderer {
 		}
 
 		const nodeCount = scene.graph.nodes.length;
-		if (this.#cullBuffer.length < nodeCount) this.#cullBuffer = new Int32Array(nodeCount);
+		if (this.#cullBuffer.length < nodeCount) {
+			this.#cullBuffer = new Int32Array(nodeCount);
+			// A fresh flag array is all zeroes, so there is nothing stale to clear.
+			this.#visibleFlags = new Uint8Array(nodeCount);
+			this.#visibleCount = 0;
+		}
 
 		const detail: DetailLevel = this.#semanticZoomEnabled
 			? detailFor(this.viewport.k)
@@ -403,12 +445,18 @@ export class HybridRenderer {
 		// enough of them, and we are zoomed in far enough for an element to be
 		// carrying information. Either one failing hands them to the canvas.
 		const nodesOnCanvas = nodeCount > DOM_NODE_LIMIT || detail !== 'full';
+		this.#nodesOnCanvas = nodesOnCanvas;
 
 		const view = this.#cullingEnabled
 			? viewRectFor(this.viewport, this.#cssWidth, this.#cssHeight)
 			: UNBOUNDED;
 
+		// Clear last frame's flags before the buffer is overwritten, then set this
+		// frame's. Two passes over the visible set, never over the whole graph.
+		for (let i = 0; i < this.#visibleCount; i++) this.#visibleFlags[this.#cullBuffer[i]] = 0;
 		const visibleCount = cullNodes(scene.graph, scene.positions, view, this.#cullBuffer);
+		for (let i = 0; i < visibleCount; i++) this.#visibleFlags[this.#cullBuffer[i]] = 1;
+		this.#visibleCount = visibleCount;
 
 		const stats = drawScene(ctx, {
 			graph: scene.graph,

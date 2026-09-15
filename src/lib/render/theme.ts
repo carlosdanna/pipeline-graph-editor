@@ -1,4 +1,4 @@
-import type { DataType, NodeKind, NodeStatus } from '$lib/graph/types';
+import { NODE_STATUSES, type DataType, type NodeKind, type NodeStatus } from '$lib/graph/types';
 
 /**
  * Colours live in TypeScript rather than CSS custom properties because from
@@ -31,6 +31,15 @@ export const STATUS_COLOR: Record<NodeStatus, string> = {
 	degraded: '#fbbf24',
 	failed: '#f87171'
 };
+
+/**
+ * The same colours indexed by position in `NODE_STATUSES`.
+ *
+ * Status is stored as a byte in `DynamicsStore`, so the canvas draw loop would
+ * otherwise have to turn that byte back into a string on every visible node,
+ * every frame, purely to index a record.
+ */
+export const STATUS_COLORS: readonly string[] = NODE_STATUSES.map((s) => STATUS_COLOR[s]);
 
 export const DATA_TYPE_COLOR: Record<DataType, string> = {
 	records: '#5b84b1',

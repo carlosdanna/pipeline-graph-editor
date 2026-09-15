@@ -1,21 +1,33 @@
 <script lang="ts">
 	import type { PerfMonitor } from '$lib/render/perf.svelte';
+	import type { UpdateBatcher } from '$lib/stream/batcher.svelte';
 
 	interface Props {
 		perf: PerfMonitor;
+		stream: UpdateBatcher;
 	}
 
-	let { perf }: Props = $props();
+	let { perf, stream }: Props = $props();
 
-	// Nothing draws when nothing moves, so idleness cannot be detected from
-	// inside the frame loop — it needs an outside heartbeat.
+	// Neither the frame loop nor the update feed runs when idle, so idleness
+	// cannot be detected from inside either — it needs an outside heartbeat.
 	$effect(() => {
-		const timer = setInterval(() => perf.poll(), 250);
+		const timer = setInterval(() => {
+			perf.poll();
+			stream.poll();
+		}, 250);
 		return () => clearInterval(timer);
 	});
 
 	const culledNodes = $derived(perf.totalNodes - perf.visibleNodes);
 	const culledEdges = $derived(perf.edgeCount - perf.visibleEdges);
+	const feed = $derived(stream.monitor);
+
+	/**
+	 * Updates that arrived for a node nothing is showing. The point of the
+	 * phase, in one number: these cost two typed-array writes and no frame.
+	 */
+	const offscreen = $derived(Math.max(0, feed.notified - feed.visibleChanges));
 </script>
 
 <aside class="hud" aria-live="off">
@@ -64,6 +76,45 @@
 		<span class="key">nodes via</span>
 		<span class="value">{perf.nodesOnCanvas ? 'canvas' : 'dom'}</span>
 	</div>
+	{#if feed.active}
+		<div class="rule"></div>
+		<div class="row">
+			<span class="key">updates</span>
+			<span class="value">{feed.updates.toLocaleString()}/s</span>
+		</div>
+		<div class="row">
+			<span class="key">coalesced</span>
+			<!-- Updates that hit a node already dirty this frame, and cost nothing. -->
+			<span class="value" class:good={feed.coalesced > 0}>
+				{feed.coalesced.toLocaleString()}/s
+			</span>
+		</div>
+		<div class="row">
+			<span class="key">notified</span>
+			<span class="value">{feed.notified.toLocaleString()}/s</span>
+		</div>
+		<div class="row">
+			<span class="key">flushes</span>
+			<span class="value">{feed.flushes.toLocaleString()}/s</span>
+		</div>
+		<div class="row">
+			<span class="key">on screen</span>
+			<!-- Flushes where a *visible* node changed. Everything else drew nothing. -->
+			<span class="value">{feed.visibleChanges.toLocaleString()}/s</span>
+		</div>
+		<div class="row">
+			<span class="key">repaints</span>
+			<!-- Canvas frames the feed caused. Zero while nodes are DOM elements. -->
+			<span class="value" class:good={feed.repaints === 0}>
+				{feed.repaints.toLocaleString()}/s
+			</span>
+		</div>
+		<div class="row">
+			<span class="key">unseen</span>
+			<span class="value" class:good={offscreen > 0}>{offscreen.toLocaleString()}/s</span>
+		</div>
+	{/if}
+
 	<div class="row">
 		<span class="key">layout</span>
 		<span class="value">
@@ -118,5 +169,11 @@
 
 	.value.good {
 		color: #34d399;
+	}
+
+	.rule {
+		height: 1px;
+		margin: 3px 0;
+		background: var(--border);
 	}
 </style>

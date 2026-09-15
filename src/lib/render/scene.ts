@@ -1,6 +1,7 @@
+import type { DynamicsStore } from '$lib/graph/dynamics.svelte';
 import { portOffsetY } from '$lib/graph/generate';
 import type { PositionStore } from '$lib/graph/positions';
-import { DATA_TYPES, type NodeDynamics, type PipelineGraph, type Rect } from '$lib/graph/types';
+import { DATA_TYPES, type PipelineGraph, type Rect } from '$lib/graph/types';
 import type { SelectionStore } from '$lib/interact/selection.svelte';
 import { edgeVisible, type ViewRect } from './cull';
 import type { EdgeAnchors } from './edge-anchors';
@@ -37,7 +38,12 @@ import { DATA_TYPE_COLOR, PALETTE, SELECTION } from './theme';
 
 export interface SceneInput {
 	readonly graph: PipelineGraph;
-	readonly dynamics: readonly NodeDynamics[];
+	/**
+	 * Read straight from the typed arrays — the canvas never subscribes to
+	 * anything. It is redrawn by the frame loop when the batcher says a visible
+	 * node changed, not by Svelte noticing a value.
+	 */
+	readonly dynamics: DynamicsStore;
 	readonly positions: PositionStore;
 	readonly buckets: EdgeBuckets;
 	readonly anchors: EdgeAnchors;

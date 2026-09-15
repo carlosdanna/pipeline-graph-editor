@@ -1,7 +1,8 @@
+import type { DynamicsStore } from '$lib/graph/dynamics.svelte';
 import type { PositionStore } from '$lib/graph/positions';
-import { NODE_KINDS, NODE_STATUSES, type NodeDynamics, type PipelineGraph } from '$lib/graph/types';
+import { NODE_KINDS, NODE_STATUSES, type PipelineGraph } from '$lib/graph/types';
 import type { DetailLevel } from './limits';
-import { KIND_COLOR, PALETTE, STATUS_COLOR, formatThroughput, truncate } from './theme';
+import { KIND_COLOR, PALETTE, STATUS_COLORS, formatThroughput, truncate } from './theme';
 
 /**
  * Nodes, drawn on the canvas.
@@ -26,7 +27,7 @@ import { KIND_COLOR, PALETTE, STATUS_COLOR, formatThroughput, truncate } from '.
 
 export interface NodeDrawInput {
 	readonly graph: PipelineGraph;
-	readonly dynamics: readonly NodeDynamics[];
+	readonly dynamics: DynamicsStore;
 	readonly positions: PositionStore;
 	/** Indices of on-screen nodes, and how many of the buffer is in use. */
 	readonly visible: Int32Array;
@@ -79,7 +80,7 @@ function drawDots(ctx: CanvasRenderingContext2D, input: NodeDrawInput): void {
 	for (let v = 0; v < visibleCount; v++) {
 		const i = visible[v];
 		const node = graph.nodes[i];
-		paths[dynamics[i].status].rect(
+		paths[dynamics.status[i]].rect(
 			positions.x[i] + node.width / 2 - half,
 			positions.y[i] + node.height / 2 - half,
 			size,
@@ -108,7 +109,7 @@ function drawBoxes(ctx: CanvasRenderingContext2D, input: NodeDrawInput): void {
 		const x = positions.x[i];
 		const y = positions.y[i];
 		kindPaths[node.kind].rect(x, y, node.width, node.height);
-		statusPathSet[dynamics[i].status].rect(x, y, node.width, node.height);
+		statusPathSet[dynamics.status[i]].rect(x, y, node.width, node.height);
 	}
 
 	ctx.globalAlpha = 0.55;
@@ -119,9 +120,9 @@ function drawBoxes(ctx: CanvasRenderingContext2D, input: NodeDrawInput): void {
 	ctx.globalAlpha = 1;
 
 	ctx.lineWidth = BORDER_PX / zoom;
-	for (const status of NODE_STATUSES) {
-		ctx.strokeStyle = STATUS_COLOR[status];
-		ctx.stroke(statusPathSet[status]);
+	for (let i = 0; i < statusPathSet.length; i++) {
+		ctx.strokeStyle = STATUS_COLORS[i];
+		ctx.stroke(statusPathSet[i]);
 	}
 }
 
@@ -153,7 +154,7 @@ function drawFull(ctx: CanvasRenderingContext2D, input: NodeDrawInput): void {
 
 		bodies.roundRect(x, y, node.width, node.height, radius);
 		kindPaths[node.kind].rect(x, y, stripe, node.height);
-		statusPathSet[dynamics[i].status].roundRect(x, y, node.width, node.height, radius);
+		statusPathSet[dynamics.status[i]].roundRect(x, y, node.width, node.height, radius);
 	}
 
 	ctx.fillStyle = PALETTE.surfaceRaised;
@@ -165,9 +166,9 @@ function drawFull(ctx: CanvasRenderingContext2D, input: NodeDrawInput): void {
 	}
 
 	ctx.lineWidth = BORDER_PX / zoom;
-	for (const status of NODE_STATUSES) {
-		ctx.strokeStyle = STATUS_COLOR[status];
-		ctx.stroke(statusPathSet[status]);
+	for (let i = 0; i < statusPathSet.length; i++) {
+		ctx.strokeStyle = STATUS_COLORS[i];
+		ctx.stroke(statusPathSet[i]);
 	}
 
 	drawLabels(ctx, input);
@@ -209,7 +210,7 @@ function drawLabels(ctx: CanvasRenderingContext2D, input: NodeDrawInput): void {
 		const node = graph.nodes[i];
 		if (node.width * zoom < RATE_MIN_NODE_WIDTH_PX) continue;
 		ctx.fillText(
-			formatThroughput(dynamics[i].throughput),
+			formatThroughput(dynamics.throughput[i]),
 			positions.x[i] + node.width - pad,
 			positions.y[i] + node.height / 2
 		);
@@ -223,9 +224,16 @@ function drawLabels(ctx: CanvasRenderingContext2D, input: NodeDrawInput): void {
 // One Path2D per colour, allocated per frame. Nine small objects a frame is not
 // worth pooling — unlike the per-edge geometry, which was 74,000.
 
-function statusPaths(): Record<string, Path2D> {
-	const paths: Record<string, Path2D> = {};
-	for (const status of NODE_STATUSES) paths[status] = new Path2D();
+/**
+ * One path per status, indexed by the same byte `DynamicsStore` stores.
+ *
+ * Keyed by number rather than by name so the draw loop never turns a status
+ * byte back into a string just to index a record — at 200 updates a second
+ * over a redrawn viewport that is pure waste.
+ */
+function statusPaths(): Path2D[] {
+	const paths = new Array<Path2D>(NODE_STATUSES.length);
+	for (let i = 0; i < paths.length; i++) paths[i] = new Path2D();
 	return paths;
 }
 
@@ -235,9 +243,9 @@ function kindPathSet(): Record<string, Path2D> {
 	return paths;
 }
 
-function fillByStatus(ctx: CanvasRenderingContext2D, paths: Record<string, Path2D>): void {
-	for (const status of NODE_STATUSES) {
-		ctx.fillStyle = STATUS_COLOR[status];
-		ctx.fill(paths[status]);
+function fillByStatus(ctx: CanvasRenderingContext2D, paths: Path2D[]): void {
+	for (let i = 0; i < paths.length; i++) {
+		ctx.fillStyle = STATUS_COLORS[i];
+		ctx.fill(paths[i]);
 	}
 }

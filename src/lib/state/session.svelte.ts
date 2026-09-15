@@ -3,6 +3,7 @@ import {
 	generateFixture,
 	type FixtureSize
 } from '$lib/graph/generate';
+import { DynamicsStore, statusIndex } from '$lib/graph/dynamics.svelte';
 import { buildGraphIndex, type GraphIndex } from '$lib/graph/indexing';
 import { addDownstreamStage, pickUpstreamCandidate } from '$lib/graph/mutate';
 import type { PositionStore } from '$lib/graph/positions';
@@ -33,6 +34,8 @@ import { DOM_NODE_LIMIT } from '$lib/render/limits';
 import { PerfMonitor } from '$lib/render/perf.svelte';
 import { VisibleNodes } from '$lib/render/visible.svelte';
 import { Viewport } from '$lib/render/viewport';
+import { UpdateBatcher } from '$lib/stream/batcher.svelte';
+import { MockUpdateSource, UPDATE_RATES } from '$lib/stream/source';
 
 /**
  * Everything the page knows about the current graph, and every operation that
@@ -52,6 +55,9 @@ import { Viewport } from '$lib/render/viewport';
  * it — motion that explains nothing.
  */
 export const ANIMATE_NODE_LIMIT = DOM_NODE_LIMIT;
+
+/** Cached once: a newly added stage starts idle. */
+const IDLE_STATUS = statusIndex('idle');
 
 export type LayoutPhase = 'placeholder' | 'running' | 'done' | 'error';
 
@@ -82,7 +88,11 @@ export interface BenchmarkRow {
 interface FixtureState {
 	readonly size: FixtureSize;
 	readonly graph: PipelineGraph;
-	readonly dynamics: readonly NodeDynamics[];
+	/**
+	 * The generator's starting telemetry. Only ever read once, to seed the live
+	 * `DynamicsStore` — it is not the running state, and nothing renders from it.
+	 */
+	readonly initialDynamics: readonly NodeDynamics[];
 	readonly index: GraphIndex;
 	readonly validation: ValidationResult;
 	readonly positions: PositionStore;
@@ -109,7 +119,7 @@ function buildFixtureState(size: FixtureSize): FixtureState {
 	return {
 		size,
 		graph: fixture.graph,
-		dynamics: fixture.initialDynamics,
+		initialDynamics: fixture.initialDynamics,
 		index,
 		validation: validateGraph(fixture.graph, index),
 		positions: placeholder.positions,
@@ -152,6 +162,32 @@ export class GraphSession implements InteractionHost {
 	);
 	readonly interaction = new InteractionController(this);
 
+	/**
+	 * Live status and throughput. A single long-lived store rather than a field
+	 * on the fixture snapshot, because the streaming source and the batcher hold
+	 * references to it across fixture changes — and because it is emphatically
+	 * not structure.
+	 */
+	readonly dynamics = DynamicsStore.from(this.fixture.initialDynamics);
+
+	/**
+	 * Updates in, one flush per frame out.
+	 *
+	 * `isVisible` reads the cull flags the renderer already maintains, which is
+	 * what lets an off-screen update cost two array writes and stop there.
+	 */
+	readonly stream = new UpdateBatcher(this.dynamics, {
+		isVisible: (index) => this.renderer.isVisible(index),
+		repaint: () => this.renderer.repaintNodes()
+	});
+
+	readonly source = new MockUpdateSource((node, status, throughput) =>
+		this.stream.queue(node, status, throughput)
+	);
+
+	streaming = $state(false);
+	updateRate = $state<number>(UPDATE_RATES[0]);
+
 	/** Build time of the current spatial index, for the stats strip. */
 	treeBuildMs = $state<number | null>(null);
 
@@ -181,6 +217,33 @@ export class GraphSession implements InteractionHost {
 	constructor() {
 		this.renderer.setInput(this.interaction);
 		this.#rebuildTree();
+		this.source.reset(this.dynamics.status, this.dynamics.throughput);
+	}
+
+	// --- Streaming -----------------------------------------------------------
+
+	toggleStream(): void {
+		if (this.streaming) this.stopStream();
+		else this.startStream();
+	}
+
+	startStream(): void {
+		if (this.streaming) return;
+		this.source.start();
+		this.streaming = this.source.running;
+	}
+
+	stopStream(): void {
+		this.source.stop();
+		this.streaming = false;
+		// Anything queued but not yet notified would otherwise sit dirty forever,
+		// since nothing will schedule another flush.
+		this.stream.flush();
+	}
+
+	setUpdateRate(rate: number): void {
+		this.updateRate = rate;
+		this.source.setRate(rate);
 	}
 
 	get graph(): PipelineGraph {
@@ -194,7 +257,21 @@ export class GraphSession implements InteractionHost {
 	async loadFixture(size: FixtureSize): Promise<void> {
 		this.#animator.stop();
 		this.interaction.cancel();
+
+		// The feed points at node indices, so it has to stop before they change
+		// meaning. Restarted below once the new store is in place.
+		const wasStreaming = this.streaming;
+		this.stopStream();
+		this.stream.reset();
+
 		this.fixture = buildFixtureState(size);
+		this.dynamics.resize(this.fixture.graph.nodes.length);
+		for (let i = 0; i < this.fixture.initialDynamics.length; i++) {
+			const d = this.fixture.initialDynamics[i];
+			this.dynamics.write(i, statusIndex(d.status), d.throughput);
+		}
+		this.stream.resize(this.fixture.graph.nodes.length);
+		this.source.reset(this.dynamics.status, this.dynamics.throughput);
 		this.selection.resize(this.fixture.graph.nodes.length, this.fixture.graph.edges.length);
 		this.selection.clear();
 		// Build against the placeholder layout so the graph is pickable in the
@@ -206,6 +283,7 @@ export class GraphSession implements InteractionHost {
 		this.perf.layoutMs = null;
 		// Frame the placeholder immediately; the real layout refits when it lands.
 		this.renderer.requestFit();
+		if (wasStreaming) this.startStream();
 		await this.runFullLayout();
 	}
 
@@ -253,7 +331,7 @@ export class GraphSession implements InteractionHost {
 	async addStage(): Promise<void> {
 		const previous = this.fixture;
 		const upstream = pickUpstreamCandidate(previous.graph, previous.index, Math.random());
-		const mutation = addDownstreamStage(previous.graph, previous.dynamics, upstream);
+		const mutation = addDownstreamStage(previous.graph, upstream);
 		if (mutation.addedIndices.length === 0) return;
 
 		this.#animator.stop();
@@ -274,7 +352,6 @@ export class GraphSession implements InteractionHost {
 		const next: FixtureState = {
 			...previous,
 			graph: mutation.graph,
-			dynamics: mutation.dynamics,
 			index,
 			positions,
 			anchors: buildEdgeAnchors(mutation.graph, index),
@@ -282,9 +359,14 @@ export class GraphSession implements InteractionHost {
 			validation: validateGraph(mutation.graph, index)
 		};
 		this.fixture = next;
-		// Node and edge indices are append-only, so this keeps every existing
-		// selection intact and simply makes room on the end.
+		// Node and edge indices are append-only, so these keep every existing
+		// selection and every live reading intact, and simply make room on the end.
 		this.selection.resize(next.graph.nodes.length, next.graph.edges.length);
+		this.dynamics.resize(next.graph.nodes.length);
+		this.stream.resize(next.graph.nodes.length);
+		// A stage that was just added has not processed anything yet.
+		for (const added of mutation.addedIndices) this.dynamics.write(added, IDLE_STATUS, 0);
+		this.source.reset(this.dynamics.status, this.dynamics.throughput);
 		this.#rebuildTree();
 		this.positionsVersion++;
 
@@ -458,6 +540,7 @@ export class GraphSession implements InteractionHost {
 	}
 
 	dispose(): void {
+		this.source.stop();
 		this.#animator.stop();
 		this.#client.dispose();
 	}

@@ -4,6 +4,7 @@
 	import PerfHud from '$lib/components/PerfHud.svelte';
 	import { FIXTURE_SIZES, type FixtureSize } from '$lib/graph/generate';
 	import { GraphSession } from '$lib/state/session.svelte';
+	import { UPDATE_RATES } from '$lib/stream/source';
 
 	const session = new GraphSession();
 
@@ -24,7 +25,7 @@
 
 <div class="app">
 	<header>
-		<h1>Pipeline graph editor <span class="phase">phase 5 — culling and semantic zoom</span></h1>
+		<h1>Pipeline graph editor <span class="phase">phase 6 — streaming updates</span></h1>
 
 		<span class="status" data-phase={session.layoutPhase}>
 			{#if session.layoutPhase === 'running'}
@@ -65,6 +66,23 @@
 		>
 			fit selection
 		</button>
+
+		<button
+			type="button"
+			class:streaming={session.streaming}
+			onclick={() => session.toggleStream()}
+		>
+			{session.streaming ? '■ stop feed' : '▶ start feed'}
+		</button>
+		<select
+			aria-label="Update rate"
+			value={session.updateRate}
+			onchange={(e) => session.setUpdateRate(Number(e.currentTarget.value))}
+		>
+			{#each UPDATE_RATES as rate (rate)}
+				<option value={rate}>{rate.toLocaleString()}/s</option>
+			{/each}
+		</select>
 
 		<span class="badge" class:ok={state.validation.ok} class:bad={!state.validation.ok}>
 			{state.validation.ok ? 'valid DAG' : `${state.validation.errors.length} errors`}
@@ -159,7 +177,7 @@
 		<GraphCanvas
 			graph={state.graph}
 			positions={state.positions}
-			dynamics={state.dynamics}
+			dynamics={session.dynamics}
 			anchors={state.anchors}
 			buckets={state.buckets}
 			selection={session.selection}
@@ -167,7 +185,7 @@
 			geometryVersion={session.positionsVersion}
 			renderer={session.renderer}
 		/>
-		<PerfHud perf={session.perf} />
+		<PerfHud perf={session.perf} stream={session.stream} />
 	</main>
 </div>
 
@@ -248,6 +266,21 @@
 		color: #0e1218;
 		background: #4fb3ff;
 		border-color: #4fb3ff;
+	}
+
+	button.streaming {
+		color: #34d399;
+		border-color: #34d399;
+	}
+
+	select {
+		padding: 4px 6px;
+		font: inherit;
+		font-size: 11px;
+		color: var(--text-muted);
+		background: var(--surface-raised);
+		border: 1px solid var(--border);
+		border-radius: 4px;
 	}
 
 	.badge {

@@ -15,7 +15,7 @@ npm run verify   # headless logic checks, see tools/
 
 Decisions and measurements are logged per phase in [NOTES.md](./NOTES.md).
 
-## Current state: phase 5 — culling and semantic zoom
+## Current state: phase 6 — streaming updates
 
 Fixture generator producing DAG-shaped pipelines at 50 / 500 / 2,000 / 10,000
 nodes, a structural validator, ELK layout in a dedicated Web Worker with stable
@@ -48,3 +48,10 @@ Zoomed in at 10,000 nodes this is a 10x reduction in per-frame JavaScript
 (1.98 ms to 0.20 ms); zoomed out it is 2.1x, all of it semantic zoom. The `cull`
 and `semantic zoom` checkboxes turn each off so the HUD shows the difference
 live.
+
+A mock telemetry feed drives status and throughput at 200 to 20,000 updates a
+second (`▶ start feed`). Updates write straight into typed arrays; only the
+notification is batched, into one flush per frame. A node updated fifty times
+between frames is notified once, an off-screen update schedules nothing, and
+while nodes are DOM elements the canvas is not touched at all. At 10,000 nodes
+zoomed in, 260 updates a second produce two canvas redraws.

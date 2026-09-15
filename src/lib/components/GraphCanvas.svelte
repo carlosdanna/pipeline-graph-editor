@@ -1,11 +1,12 @@
 <script lang="ts">
+	import GraphNode from './GraphNode.svelte';
+	import type { DynamicsStore } from '$lib/graph/dynamics.svelte';
 	import type { PositionStore } from '$lib/graph/positions';
-	import type { NodeDynamics, PipelineGraph } from '$lib/graph/types';
+	import type { PipelineGraph } from '$lib/graph/types';
 	import type { SelectionStore } from '$lib/interact/selection.svelte';
 	import type { EdgeAnchors } from '$lib/render/edge-anchors';
 	import type { EdgeBuckets } from '$lib/render/edge-buckets';
 	import type { HybridRenderer } from '$lib/render/hybrid-renderer';
-	import { KIND_COLOR, STATUS_COLOR, formatThroughput, truncate } from '$lib/render/theme';
 	import type { VisibleNodes } from '$lib/render/visible.svelte';
 
 	/**
@@ -25,7 +26,12 @@
 	interface Props {
 		graph: PipelineGraph;
 		positions: PositionStore;
-		dynamics: readonly NodeDynamics[];
+		/**
+		 * Status and throughput. Deliberately *not* read in this component —
+		 * each `GraphNode` subscribes to its own node, so a streaming update
+		 * repaints one element rather than invalidating this list.
+		 */
+		dynamics: DynamicsStore;
 		/**
 		 * Structural render caches, built by the session when the graph changes.
 		 * Passed in rather than derived here so the renderer and the hit-tester
@@ -73,6 +79,10 @@
 	 * animation frame — 2,000 template literals per frame at the DOM limit, and
 	 * the honest reason the limit existed. Culling reduces it to what is on
 	 * screen, which is a few dozen, so the same code is now roughly free.
+	 *
+	 * Note what is *not* in here: status and throughput. Those change 200 times
+	 * a second, and including them would mean this whole list rebuilt 200 times
+	 * a second. Each `GraphNode` reads its own.
 	 */
 	const domNodes = $derived.by(() => {
 		void geometryVersion;
@@ -80,9 +90,8 @@
 		return visible.indices.map((i) => ({
 			index: i,
 			node: graph.nodes[i],
-			offset: `${positions.x[i]}px ${positions.y[i]}px`,
-			status: dynamics[i].status,
-			throughput: dynamics[i].throughput
+			x: positions.x[i],
+			y: positions.y[i]
 		}));
 	});
 </script>
@@ -92,17 +101,13 @@
 
 	<div class="node-layer" {@attach renderer.attachLayer}>
 		{#each domNodes as entry (entry.node.id)}
-			<div
-				class="node"
-				style:translate={entry.offset}
-				style:width="{entry.node.width}px"
-				style:height="{entry.node.height}px"
-				style:--kind={KIND_COLOR[entry.node.kind]}
-				style:--status={STATUS_COLOR[entry.status]}
-			>
-				<span class="label">{truncate(entry.node.label, 17)}</span>
-				<span class="rate">{formatThroughput(entry.throughput)}</span>
-			</div>
+			<GraphNode
+				index={entry.index}
+				node={entry.node}
+				x={entry.x}
+				y={entry.y}
+				{dynamics}
+			/>
 		{/each}
 	</div>
 </div>
@@ -145,32 +150,4 @@
 		will-change: transform;
 	}
 
-	.node {
-		position: absolute;
-		top: 0;
-		left: 0;
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 0 8px 0 10px;
-		overflow: hidden;
-		background: var(--surface-raised);
-		border: 1px solid var(--status);
-		border-left: 3px solid var(--kind);
-		border-radius: 6px;
-		box-sizing: border-box;
-	}
-
-	.label {
-		flex: 1;
-		font-size: 11px;
-		color: var(--text);
-		white-space: nowrap;
-	}
-
-	.rate {
-		font-size: 9.5px;
-		color: var(--text-muted);
-		white-space: nowrap;
-	}
 </style>

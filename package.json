@@ -13,7 +13,8 @@
 		"verify:interact": "npx esbuild tools/verify-interact.ts --bundle --format=esm --platform=node --alias:'$lib'=./src/lib --banner:js='globalThis.$state=(v)=>v;' --outfile=node_modules/.verify/verify-interact.mjs --log-level=warning && node node_modules/.verify/verify-interact.mjs",
 		"verify:gestures": "npx esbuild tools/verify-gestures.ts --bundle --format=esm --platform=node --alias:'$lib'=./src/lib --banner:js='globalThis.$state=(v)=>v;' --outfile=node_modules/.verify/verify-gestures.mjs --log-level=warning && node node_modules/.verify/verify-gestures.mjs",
 		"verify:draw": "npx esbuild tools/verify-draw.ts --bundle --format=esm --platform=node --alias:'$lib'=./src/lib --banner:js='globalThis.$state=(v)=>v;' --outfile=node_modules/.verify/verify-draw.mjs --log-level=warning && node node_modules/.verify/verify-draw.mjs",
-		"verify": "npm run verify:interact && npm run verify:gestures && npm run verify:draw"
+		"verify": "npm run verify:interact && npm run verify:gestures && npm run verify:stream && npm run verify:draw",
+		"verify:stream": "npx esbuild tools/verify-stream.ts --bundle --format=esm --platform=node --alias:'$lib'=./src/lib --banner:js='globalThis.$state=(v)=>v;' --outfile=node_modules/.verify/verify-stream.mjs --log-level=warning && node node_modules/.verify/verify-stream.mjs"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-static": "^3.0.10",

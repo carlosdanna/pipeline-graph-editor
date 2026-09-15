@@ -906,3 +906,161 @@ fail before trusting that it passed.
 - Detail tiers are chosen from zoom alone. Density would be a better signal — a
   sparse graph at 0.3x is perfectly readable as boxes — but zoom is the thing
   the brief specified and the thing a user can predict.
+
+---
+
+## Phase 6 — streaming updates
+
+### What landed
+
+```
+src/lib/graph/dynamics.svelte.ts   typed arrays + lazy per-node reactive cells
+src/lib/stream/source.ts           mock feed, seeded, timer-driven
+src/lib/stream/batcher.svelte.ts   one flush per frame, and the HUD numbers
+src/lib/components/GraphNode.svelte  one node, one subscription
+```
+
+`hybrid-renderer.ts` gained `isVisible()` over the cull flags and
+`repaintNodes()`. `mutate.ts` stopped threading dynamics through structural
+edits. The HUD grew a streaming block.
+
+### The fork, decided
+
+Requirement 3 asks that a status change repaint one node and never trigger a
+full canvas redraw. For DOM nodes that is literal. For canvas-drawn nodes there
+is no such thing as repainting one, and you chose: redraw the already-culled
+scene once per frame, only when a *visible* node changed. Dirty rectangles lose
+to the fact that edges and the grid pass under every node; a second canvas layer
+would save ~0.15 ms of a 0.20 ms frame and cost a second backing store at DPR.
+
+### Decisions
+
+**The data is written immediately; only the notification is batched.** An update
+writes two typed-array slots and marks a byte. No proxy, no signal, no
+allocation. Once per frame the dirty nodes are notified. A node updated fifty
+times between two frames is notified once, and the value that survives is simply
+the last one written — coalescing falls out of the storage rather than being
+implemented.
+
+**Reactivity is allocated per node, lazily.** A `$state` array of
+`{status, throughput}` objects would be 10,000 proxies, and worse, every node is
+subscribed to by the same `{#each}` — so one write invalidates the whole list.
+An array of objects cannot express "repaint one node" however it is wrapped. One
+signal per node allocated up front is 10,000 signals serving at most a few
+hundred elements. Cells are created on first `view()` and kept, so the count
+converges on "nodes that have ever been on screen", which the cull margin
+already bounds.
+
+**The component boundary *is* the granularity.** `GraphNode.svelte` exists for
+one reason: `dynamics.view(index)` inside it subscribes that component and
+nothing else. The same code inline in the parent's `{#each}` would put every
+node's status read in one reactive scope. Position stays a prop, because
+position genuinely does change for every node at once during a tween.
+
+**Visibility is checked when the update arrives**, against the flag array the
+cull pass already maintains — `isVisible` is one `Uint8Array` read. That is what
+makes an off-screen update cost two writes and stop.
+
+**The canvas is not touched at all while nodes are DOM elements.** `repaintNodes`
+returns false in that mode. Nothing the canvas draws depends on status — edges
+are coloured by data type, ports by port type, selection rings by selection — so
+a status change at 2,000 nodes costs the canvas exactly zero. This is the
+literal reading of requirement 3, and I nearly shipped the opposite (see below).
+
+**The source is not driven by rAF.** A real feed is a socket delivering when the
+network delivers, with no relationship to the display refresh, and absorbing that
+mismatch is the batcher's entire job. Driving the mock from rAF would quietly
+pre-batch the updates and make the batcher look like it was working when it was
+not. It is a 10 ms timer, seeded like the fixture generator so a run replays.
+
+### What surprised me
+
+**Batching is free. The repaint is the entire cost.** I expected the
+queue-and-coalesce path to be where the 200/second budget went. It is not close:
+
+| rate      | updates/frame | queue   | flush   | total   | of 16.7 ms |
+|-----------|---------------|---------|---------|---------|------------|
+| 200/s     | 3             | 0.000 ms | 0.001 ms | 0.001 ms | 0.0% |
+| 1,000/s   | 17            | 0.003 ms | 0.001 ms | 0.004 ms | 0.0% |
+| 5,000/s   | 83            | 0.012 ms | 0.002 ms | 0.013 ms | 0.1% |
+| 20,000/s  | 333           | 0.024 ms | 0.004 ms | 0.029 ms | 0.2% |
+
+A hundred times the required rate is a fifth of one percent of a frame. All the
+interesting behaviour is in what the flush *causes*, not in the flush.
+
+**The repaint rate depends on zoom, not on the feed rate.** This is the finding
+I would not have predicted, and it is really a phase 5 result arriving late. One
+second of a ~200/s feed over the 10k fixture:
+
+| visible         | updates | flushes | canvas redraws | frames drawn |
+|-----------------|---------|---------|----------------|--------------|
+| 81 / 10,000     | 260     | 60      | 2              | 3%           |
+| 316 / 10,000    | 260     | 60      | 7              | 12%          |
+| 1,249 / 10,000  | 260     | 60      | 28             | 47%          |
+| 10,000 / 10,000 | 260     | 60      | 60             | 100%         |
+
+Same feed, same batcher, 30x difference in redraws — decided entirely by where
+the viewport is. Zoomed in, 260 updates a second produce **two** canvas frames.
+Culling did not just make each frame cheaper; it made most frames not happen.
+Worst case is fit-to-screen, where everything is visible and every frame
+redraws — but that is the 0.77 ms dot tier, so 60 redraws a second is 4.6% of
+the budget.
+
+**I nearly shipped a canvas redraw on every DOM status change.** The batcher
+called `repaint()` whenever a visible node changed, without asking whether the
+canvas owned nodes. At the 2,000-node fixture — the case requirement 3 was
+written about — that meant a status change re-stroked every visible edge to
+produce pixels that could not possibly differ. Caught by writing the test that
+asserts the opposite, not by reading the code. The fix is `repaintNodes()`
+returning whether a frame was actually needed, which also makes the HUD's
+`repaints` row read 0 while nodes are elements, so the property is visible
+rather than merely true.
+
+**Dropping dynamics from `mutate.ts` made it shorter and better.** Structural
+edits were threading a dynamics array through purely to append one entry.
+Removing it means a structural edit does not have to know telemetry exists — the
+session grows the store. Three phases of insisting structure and dynamics are
+separate, and the mutation API had quietly been coupling them the whole time.
+
+### Verified
+
+`npm run verify:stream` — 25 checks. `requestAnimationFrame` is shimmed so
+frames are stepped by hand, which is the only reason "batched into one
+frame-sized flush" is testable at all: it is a claim about frame boundaries, and
+in a browser you cannot place them.
+
+```
+the value is readable before any frame runs
+fifty updates to one node -> one frame, one notification, one repaint
+three nodes touched nine times -> three notifications, [1, 2, 3]
+a thousand off-screen updates -> zero repaints, zero cells, data still current
+one on-screen update among a thousand -> exactly one repaint
+only the changed node is notified, with both nodes rendered
+DOM mode: 200 nodes notified, zero canvas frames
+the graph object, the node objects and their shape are untouched
+200/s emits 2 per 10ms tick; idle and failed stages report zero throughput
+the same seed replays the same feed
+```
+
+The "structure is never touched" checks assert reference equality on the graph
+and on a node object, and that no `status` or `throughput` field has appeared on
+a `PipelineNode`. That is the phase 1 rule, finally enforced by something other
+than my intentions.
+
+### Known limitations, carried forward
+
+- At fit-to-screen every node is visible, so every frame redraws while the feed
+  runs. It is the cheap tier, so this is 4.6% of budget, but it is the one
+  configuration where streaming and rendering do not decouple.
+- Cell count grows monotonically as you pan — bounded by "nodes ever rendered",
+  not by "nodes on screen". At the 2,000 DOM limit that is bounded by the
+  fixture; nothing reclaims them.
+- The source is a `setInterval`, so a background tab throttles it. The HUD shows
+  the rate actually delivered rather than the rate requested, which is the right
+  number but means the two can disagree.
+- Throughput is stored as Float32. Rates reach ~10^5, where float32 resolves to
+  about 0.01 — irrelevant for a displayed rate, worth knowing before summing
+  them for a total in phase 7.
+- A status change still repaints the canvas during a layout tween or a drag,
+  when the canvas is redrawing every frame anyway. Harmless, but the `repaints`
+  number over-attributes to the feed in those moments.

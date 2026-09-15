@@ -20,6 +20,7 @@ import { cullNodes, viewRectFor, type ViewRect } from '$lib/render/cull';
 import { detailFor, DOM_NODE_LIMIT } from '$lib/render/limits';
 import { drawScene } from '$lib/render/scene';
 import { SelectionStore } from '$lib/interact/selection.svelte';
+import { DynamicsStore } from '$lib/graph/dynamics.svelte';
 import { Viewport } from '$lib/render/viewport';
 
 class StubPath2D {
@@ -77,6 +78,7 @@ for (const size of FIXTURE_SIZES) {
 	const anchors = buildEdgeAnchors(fixture.graph, index);
 	const buckets = buildEdgeBuckets(fixture.graph);
 	const selection = new SelectionStore(fixture.graph.nodes.length, fixture.graph.edges.length);
+	const dynamics = DynamicsStore.from(fixture.initialDynamics);
 	const buffer = new Int32Array(fixture.graph.nodes.length);
 
 	const viewport = new Viewport();
@@ -111,7 +113,7 @@ for (const size of FIXTURE_SIZES) {
 
 		const input = {
 			graph: fixture.graph,
-			dynamics: fixture.initialDynamics,
+			dynamics,
 			positions,
 			buckets,
 			anchors,

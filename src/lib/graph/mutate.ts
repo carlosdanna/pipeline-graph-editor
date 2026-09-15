@@ -1,6 +1,6 @@
 import { nodeHeightFor, NODE_WIDTH } from './generate';
 import type { GraphIndex } from './indexing';
-import type { NodeDynamics, PipelineEdge, PipelineGraph, PipelineNode, Port } from './types';
+import type { PipelineEdge, PipelineGraph, PipelineNode, Port } from './types';
 
 /**
  * Structural edits.
@@ -18,7 +18,6 @@ import type { NodeDynamics, PipelineEdge, PipelineGraph, PipelineNode, Port } fr
 
 export interface GraphMutation {
 	readonly graph: PipelineGraph;
-	readonly dynamics: readonly NodeDynamics[];
 	/** Indices of the nodes that were added — the dirty set for layout. */
 	readonly addedIndices: readonly number[];
 }
@@ -32,12 +31,11 @@ export interface GraphMutation {
  */
 export function addDownstreamStage(
 	graph: PipelineGraph,
-	dynamics: readonly NodeDynamics[],
 	upstreamIndex: number
 ): GraphMutation {
 	const upstream = graph.nodes[upstreamIndex];
 	const sourcePort = upstream.outputs[0];
-	if (!sourcePort) return { graph, dynamics, addedIndices: [] };
+	if (!sourcePort) return { graph, addedIndices: [] };
 
 	const newIndex = graph.nodes.length;
 	const id = `n${newIndex}`;
@@ -75,10 +73,11 @@ export function addDownstreamStage(
 		dataType: sourcePort.dataType
 	};
 
+	// Dynamics are deliberately not threaded through here. Structure and
+	// dynamics are separate stores, and a structural edit should not have to
+	// know that telemetry exists — the session grows the dynamics store itself.
 	return {
 		graph: { nodes: [...graph.nodes, node], edges: [...graph.edges, edge] },
-		// A stage that was just added has not processed anything yet.
-		dynamics: [...dynamics, { status: 'idle', throughput: 0 }],
 		addedIndices: [newIndex]
 	};
 }
