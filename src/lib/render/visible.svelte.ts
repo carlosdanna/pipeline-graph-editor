@@ -29,6 +29,14 @@ export class VisibleNodes {
 	/** False when the canvas is drawing node bodies instead. */
 	domNodes = $state(false);
 
+	/**
+	 * How many nodes are on screen in total — which is not `indices.length`
+	 * whenever the list was capped. The accessible tree reports this so a screen
+	 * reader is told "40 of 10,000 stages on screen" rather than being quietly
+	 * handed a truncated list.
+	 */
+	visibleCount = $state(0);
+
 	#current: number[] = [];
 
 	/**
@@ -37,8 +45,16 @@ export class VisibleNodes {
 	 * The comparison is O(visible) — a few dozen integers — against the cost of
 	 * invalidating a keyed each block, so it is worth doing on every frame.
 	 */
-	publish(buffer: Int32Array, count: number): void {
-		if (!this.domNodes) this.domNodes = true;
+	publish(buffer: Int32Array, count: number, domOwnsNodes: boolean, cap: number): void {
+		if (this.domNodes !== domOwnsNodes) this.domNodes = domOwnsNodes;
+		if (this.visibleCount !== count) this.visibleCount = count;
+
+		// The DOM layer needs every visible node or it would draw gaps. Nothing
+		// else does — when the canvas owns the bodies, the only consumer is the
+		// accessible tree, which is bounded anyway, so capping here stops a
+		// fit-to-screen at 10,000 nodes allocating a 10,000-element array on
+		// every frame to serve a list that will describe 150 of them.
+		if (!domOwnsNodes) count = Math.min(count, cap);
 
 		if (this.#current.length === count) {
 			let same = true;
@@ -57,9 +73,10 @@ export class VisibleNodes {
 		this.indices = next;
 	}
 
-	/** The canvas has taken over the nodes; the DOM layer should render nothing. */
+	/** Nothing is on screen — between fixtures, or before the first measure. */
 	clear(): void {
 		if (this.domNodes) this.domNodes = false;
+		if (this.visibleCount !== 0) this.visibleCount = 0;
 		if (this.#current.length === 0) return;
 		this.#current = [];
 		this.indices = this.#current;

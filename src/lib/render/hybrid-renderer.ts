@@ -2,6 +2,7 @@ import type { DynamicsStore } from '$lib/graph/dynamics.svelte';
 import { graphBounds, type PositionStore } from '$lib/graph/positions';
 import type { PipelineGraph, Rect } from '$lib/graph/types';
 import type { SelectionStore } from '$lib/interact/selection.svelte';
+import { A11Y_NODE_LIMIT } from '$lib/a11y/tree';
 import { cullNodes, viewRectFor, type ViewRect } from './cull';
 import type { EdgeAnchors } from './edge-anchors';
 import type { EdgeBuckets } from './edge-buckets';
@@ -105,6 +106,7 @@ export class HybridRenderer {
 	#layer: HTMLElement | null = null;
 	#surface: HTMLElement | null = null;
 	#input: InputTarget | null = null;
+	#keyHandler: ((event: KeyboardEvent) => void) | null = null;
 
 	#scene: Scene | null = null;
 	#cssWidth = 0;
@@ -198,9 +200,35 @@ export class HybridRenderer {
 		this.#input = target;
 	}
 
+	/**
+	 * Keyboard shortcuts for the graph surface.
+	 *
+	 * Attached here rather than in the component's markup for the same reason
+	 * the pointer and wheel handlers are: this class owns the DOM plumbing for
+	 * input, and the surface is its element. Keeping all four together also
+	 * means they are added and removed as one, so there is no route by which a
+	 * detached surface keeps listening.
+	 */
+	setKeyHandler(handler: (event: KeyboardEvent) => void): void {
+		this.#keyHandler = handler;
+	}
+
 	/** Frame the whole graph on the next draw, once sizes are known. */
 	requestFit(): void {
 		this.#pendingFit = true;
+		this.schedule();
+	}
+
+	/**
+	 * Zooms about the middle of the viewport. What `+` and `-` do.
+	 *
+	 * The centre rather than the cursor, because there is no cursor involved —
+	 * anchoring a keyboard zoom to wherever the mouse happens to be resting
+	 * would move the view for reasons the user cannot see.
+	 */
+	zoomAtCentre(factor: number): void {
+		if (this.#cssWidth === 0) this.#measure();
+		this.viewport.zoomBy(factor, this.#cssWidth / 2, this.#cssHeight / 2);
 		this.schedule();
 	}
 
@@ -271,6 +299,7 @@ export class HybridRenderer {
 		element.addEventListener('pointercancel', this.#onPointerCancel);
 		// Not passive: zooming must preventDefault to stop the page scrolling.
 		element.addEventListener('wheel', this.#onWheel, { passive: false });
+		element.addEventListener('keydown', this.#onKeyDown);
 
 		const dprWatcher = this.#watchDevicePixelRatio();
 
@@ -284,6 +313,7 @@ export class HybridRenderer {
 			element.removeEventListener('pointerup', this.#onPointerUp);
 			element.removeEventListener('pointercancel', this.#onPointerCancel);
 			element.removeEventListener('wheel', this.#onWheel);
+			element.removeEventListener('keydown', this.#onKeyDown);
 			dprWatcher();
 			this.#scheduler.cancel();
 			this.#surface = null;
@@ -321,7 +351,13 @@ export class HybridRenderer {
 		this.#lastPointerX = event.clientX;
 		this.#lastPointerY = event.clientY;
 		this.#pointerId = event.pointerId;
-		(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+
+		const surface = event.currentTarget as HTMLElement;
+		surface.setPointerCapture(event.pointerId);
+		// `preventDefault` above suppresses the focus a click would normally give,
+		// so take it explicitly: after clicking the graph, the arrow keys have to
+		// work without a Tab press first.
+		surface.focus({ preventScroll: true });
 
 		this.#input?.onPointerDown(this.#normalise(event));
 	};
@@ -359,6 +395,10 @@ export class HybridRenderer {
 			element.releasePointerCapture(event.pointerId);
 		}
 	}
+
+	#onKeyDown = (event: KeyboardEvent): void => {
+		this.#keyHandler?.(event);
+	};
 
 	#onWheel = (event: WheelEvent): void => {
 		event.preventDefault();
@@ -495,9 +535,10 @@ export class HybridRenderer {
 		this.#applyLayerTransform();
 
 		// This one deliberately does not have to be the same frame — see
-		// visible.svelte.ts for why the cull margin makes that safe.
-		if (nodesOnCanvas) this.#visible.clear();
-		else this.#visible.publish(this.#cullBuffer, visibleCount);
+		// visible.svelte.ts for why the cull margin makes that safe. Published in
+		// both modes now, because the accessible tree needs to know what is on
+		// screen whether or not the DOM is drawing it.
+		this.#visible.publish(this.#cullBuffer, visibleCount, !nodesOnCanvas, A11Y_NODE_LIMIT);
 
 		this.#perf.record(now, stats, this.viewport.k);
 	}

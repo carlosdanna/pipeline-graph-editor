@@ -23,11 +23,13 @@
 		top: number;
 		selected: boolean;
 		primary: boolean;
+		/** Roving tabindex: exactly one row in the list is in the tab order. */
+		tabbable: boolean;
 		dynamics: DynamicsStore;
 		onselect: (index: number, additive: boolean) => void;
 	}
 
-	let { index, node, top, selected, primary, dynamics, onselect }: Props = $props();
+	let { index, node, top, selected, primary, tabbable, dynamics, onselect }: Props = $props();
 
 	const live = $derived(dynamics.view(index));
 </script>
@@ -41,7 +43,8 @@
 	role="row"
 	aria-rowindex={index + 2}
 	aria-selected={selected}
-	tabindex="-1"
+	data-row={index}
+	tabindex={tabbable ? 0 : -1}
 	onclick={(e) => onselect(index, e.shiftKey)}
 	onkeydown={(e) => {
 		if (e.key === 'Enter' || e.key === ' ') {
@@ -94,6 +97,11 @@
 
 	.row.primary {
 		box-shadow: inset 2px 0 0 #4fb3ff;
+	}
+
+	.row:focus-visible {
+		outline: 2px solid #4fb3ff;
+		outline-offset: -2px;
 	}
 
 	.cell {

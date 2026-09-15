@@ -1,5 +1,7 @@
 <script lang="ts">
+	import AccessibleGraph from './AccessibleGraph.svelte';
 	import GraphNode from './GraphNode.svelte';
+	import type { NavigationContext } from '$lib/a11y/navigate';
 	import type { DynamicsStore } from '$lib/graph/dynamics.svelte';
 	import type { PositionStore } from '$lib/graph/positions';
 	import type { PipelineGraph } from '$lib/graph/types';
@@ -47,6 +49,10 @@
 		selection: SelectionStore;
 		/** Which nodes are on screen, published by the frame loop. */
 		visible: VisibleNodes;
+		/** Graph adjacency and layering, for the accessible tree. */
+		navigation: NavigationContext;
+		/** The node the keyboard is on, or -1. */
+		focusedNode: number;
 		/** Bumped when positions are written in place; see session.svelte.ts. */
 		geometryVersion: number;
 		renderer: HybridRenderer;
@@ -60,6 +66,8 @@
 		buckets,
 		selection,
 		visible,
+		navigation,
+		focusedNode,
 		geometryVersion,
 		renderer
 	}: Props = $props();
@@ -96,10 +104,41 @@
 	});
 </script>
 
-<div class="surface" {@attach renderer.attachSurface}>
-	<canvas {@attach renderer.attachCanvas}></canvas>
+<!--
+	`tabindex="-1"` makes the surface focusable by click but keeps it out of the
+	tab order — Tab lands on the focused node inside the accessible tree instead,
+	which is a more useful place to arrive. The renderer focuses this element on
+	pointerdown, because its `preventDefault` suppresses the focus a click would
+	otherwise give, and the arrow keys have to work straight after a click.
+-->
+<div
+	class="surface"
+	role="application"
+	aria-label="Pipeline graph"
+	tabindex="-1"
+	{@attach renderer.attachSurface}
+>
+	<!--
+		`role="application"` is what makes the arrow keys reach us: without it a
+		screen reader is in browse mode and consumes them for its own navigation.
+		It is also honest — this is a widget with its own interaction model, not a
+		document.
 
-	<div class="node-layer" {@attach renderer.attachLayer}>
+		The keydown listener is attached by HybridRenderer alongside the pointer
+		and wheel listeners, not bound here. Input plumbing lives in one place, and
+		all four are added and removed together.
+
+		Everything visual inside it is hidden from assistive technology. The canvas
+		has no accessible content to begin with, and the DOM node layer would
+		otherwise be read out *alongside* the parallel tree, which describes the
+		same nodes — the same stage twice, once well and once as loose text. The
+		tree is the single accessible representation of what is drawn.
+	-->
+	<canvas aria-hidden="true" {@attach renderer.attachCanvas}></canvas>
+
+	<AccessibleGraph {graph} {navigation} {anchors} {dynamics} {selection} {visible} {focusedNode} />
+
+	<div class="node-layer" aria-hidden="true" {@attach renderer.attachLayer}>
 		{#each domNodes as entry (entry.node.id)}
 			<GraphNode
 				index={entry.index}
@@ -125,6 +164,16 @@
 
 	.surface:active {
 		cursor: grabbing;
+	}
+
+	/* Clicking the graph focuses it, so suppress the ring for that case only. */
+	.surface:focus {
+		outline: none;
+	}
+
+	.surface:focus-visible {
+		outline: 2px solid #4fb3ff;
+		outline-offset: -2px;
 	}
 
 	canvas {

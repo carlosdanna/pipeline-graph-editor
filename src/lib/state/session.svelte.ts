@@ -3,8 +3,10 @@ import {
 	generateFixture,
 	type FixtureSize
 } from '$lib/graph/generate';
+import { moveFocus as moveFocusTo, type NavigationContext } from '$lib/a11y/navigate';
+import { actionFor, isFromTextInput } from '$lib/a11y/shortcuts';
 import { DynamicsStore, statusIndex } from '$lib/graph/dynamics.svelte';
-import { buildGraphIndex, type GraphIndex } from '$lib/graph/indexing';
+import { buildGraphIndex, computeLayers, type GraphIndex } from '$lib/graph/indexing';
 import { addDownstreamStage, pickUpstreamCandidate } from '$lib/graph/mutate';
 import type { PositionStore } from '$lib/graph/positions';
 import type { NodeDynamics, PipelineGraph } from '$lib/graph/types';
@@ -94,6 +96,12 @@ interface FixtureState {
 	 */
 	readonly initialDynamics: readonly NodeDynamics[];
 	readonly index: GraphIndex;
+	/**
+	 * Layer per node. Used by keyboard navigation, where up and down walk the
+	 * layer — see a11y/navigate.ts. Structural, so it is computed with the index
+	 * and survives a drag, which grouping by x position would not.
+	 */
+	readonly layers: Int32Array;
 	readonly validation: ValidationResult;
 	readonly positions: PositionStore;
 	/**
@@ -121,6 +129,9 @@ function buildFixtureState(size: FixtureSize): FixtureState {
 		graph: fixture.graph,
 		initialDynamics: fixture.initialDynamics,
 		index,
+		// A cyclic graph has no layering; one flat layer still gives a total order
+		// for up and down, so navigation degrades rather than breaking.
+		layers: computeLayers(fixture.graph, index) ?? new Int32Array(fixture.graph.nodes.length),
 		validation: validateGraph(fixture.graph, index),
 		positions: placeholder.positions,
 		anchors: buildEdgeAnchors(fixture.graph, index),
@@ -188,6 +199,17 @@ export class GraphSession implements InteractionHost {
 	streaming = $state(false);
 	updateRate = $state<number>(UPDATE_RATES[0]);
 
+	/**
+	 * The node the keyboard is on, or -1.
+	 *
+	 * Separate from `selection.primaryNode` because moving focus must not select
+	 * — otherwise arrowing across the graph would select every node on the way,
+	 * and Enter would have nothing left to mean. They are kept in step from the
+	 * other direction: a pointer pick moves focus, so an arrow key after a click
+	 * continues from what was clicked.
+	 */
+	focusedNode = $state(-1);
+
 	/** Build time of the current spatial index, for the stats strip. */
 	treeBuildMs = $state<number | null>(null);
 
@@ -216,6 +238,7 @@ export class GraphSession implements InteractionHost {
 
 	constructor() {
 		this.renderer.setInput(this.interaction);
+		this.renderer.setKeyHandler((event) => this.handleKey(event));
 		this.#rebuildTree();
 		this.source.reset(this.dynamics.status, this.dynamics.throughput);
 	}
@@ -265,6 +288,7 @@ export class GraphSession implements InteractionHost {
 		this.stream.reset();
 
 		this.fixture = buildFixtureState(size);
+		this.focusedNode = -1;
 		this.dynamics.resize(this.fixture.graph.nodes.length);
 		for (let i = 0; i < this.fixture.initialDynamics.length; i++) {
 			const d = this.fixture.initialDynamics[i];
@@ -353,6 +377,7 @@ export class GraphSession implements InteractionHost {
 			...previous,
 			graph: mutation.graph,
 			index,
+			layers: computeLayers(mutation.graph, index) ?? new Int32Array(mutation.graph.nodes.length),
 			positions,
 			anchors: buildEdgeAnchors(mutation.graph, index),
 			buckets: buildEdgeBuckets(mutation.graph),
@@ -484,6 +509,99 @@ export class GraphSession implements InteractionHost {
 		this.#rebuildTree();
 	}
 
+	nodePicked(index: number): void {
+		this.focusedNode = index;
+	}
+
+	// --- Keyboard ------------------------------------------------------------
+
+	/**
+	 * Every shortcut, in one place. The mapping from key to intent lives in
+	 * `shortcuts.ts` and is tested on its own; this is only what each intent does.
+	 */
+	handleKey(event: KeyboardEvent): void {
+		if (isFromTextInput(event.target)) return;
+
+		const action = actionFor(event);
+		if (!action) return;
+		event.preventDefault();
+
+		switch (action.type) {
+			case 'move':
+				this.#moveFocus(action.direction);
+				break;
+
+			case 'select': {
+				const target = this.#effectiveFocus();
+				if (target < 0) return;
+				if (action.additive) this.selection.toggleNode(target);
+				else this.selection.selectNode(target, false);
+				this.renderer.schedule();
+				break;
+			}
+
+			case 'clear':
+				this.selection.clear();
+				this.renderer.schedule();
+				break;
+
+			case 'zoom':
+				this.renderer.zoomAtCentre(action.factor);
+				break;
+
+			case 'fit':
+				this.renderer.requestFit();
+				break;
+		}
+	}
+
+	/**
+	 * Where an arrow key starts from.
+	 *
+	 * Falls back to the selection, then to the first node on screen, so the very
+	 * first arrow press always does something visible rather than silently
+	 * finding nothing to move from.
+	 */
+	#effectiveFocus(): number {
+		if (this.focusedNode >= 0) return this.focusedNode;
+		if (this.selection.primaryNode >= 0) return this.selection.primaryNode;
+		return this.visibleNodes.indices[0] ?? (this.fixture.graph.nodes.length > 0 ? 0 : -1);
+	}
+
+	#moveFocus(direction: 'up' | 'down' | 'left' | 'right'): void {
+		const start = this.#effectiveFocus();
+		if (start < 0) return;
+
+		// The first press only establishes where focus is; it should not also
+		// jump somewhere, or the graph moves before you have seen where you are.
+		if (this.focusedNode < 0) {
+			this.focusNode(start);
+			return;
+		}
+
+		const next = moveFocusTo(this.navigationContext(), start, direction);
+		// -1 means the end of a branch. Focus stays put rather than wrapping,
+		// which at 10,000 nodes would teleport you with no way to notice.
+		if (next >= 0) this.focusNode(next);
+	}
+
+	/** Everything keyboard navigation and the accessible tree need to read. */
+	navigationContext(): NavigationContext {
+		const state = this.fixture;
+		return {
+			graph: state.graph,
+			index: state.index,
+			positions: state.positions,
+			layers: state.layers
+		};
+	}
+
+	/** Moves keyboard focus to a node and brings it on screen. */
+	focusNode(index: number): void {
+		this.focusedNode = index;
+		this.revealNode(index);
+	}
+
 	/**
 	 * A row was clicked in the table.
 	 *
@@ -494,6 +612,7 @@ export class GraphSession implements InteractionHost {
 	selectFromTable(index: number, additive: boolean): void {
 		if (additive) this.selection.toggleNode(index);
 		else this.selection.selectNode(index, false);
+		this.focusedNode = index;
 
 		// Panning to a node that was just deselected would be confusing.
 		if (this.selection.hasNode(index)) this.revealNode(index);

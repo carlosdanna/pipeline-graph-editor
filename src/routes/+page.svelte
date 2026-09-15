@@ -26,7 +26,7 @@
 
 <div class="app">
 	<header>
-		<h1>Pipeline graph editor <span class="phase">phase 7 — table pane</span></h1>
+		<h1>Pipeline graph editor <span class="phase">phase 8 — accessibility and keyboard</span></h1>
 
 		<span class="status" data-phase={session.layoutPhase}>
 			{#if session.layoutPhase === 'running'}
@@ -147,8 +147,8 @@
 	{/if}
 
 	<p class="hint">
-		drag to pan · wheel to zoom · click a node or edge to select · shift-click to toggle ·
-		shift-drag empty space to marquee · drag a node to move it · click a row to pan to it
+		drag to pan · wheel to zoom · click to select · shift-click to toggle · shift-drag to marquee
+		· arrows move between connected stages · enter selects · esc clears · +/− zoom · 0 fits
 
 		<span class="toggles">
 			<!--
@@ -183,6 +183,8 @@
 			buckets={state.buckets}
 			selection={session.selection}
 			visible={session.visibleNodes}
+			navigation={session.navigationContext()}
+			focusedNode={session.focusedNode}
 			geometryVersion={session.positionsVersion}
 			renderer={session.renderer}
 		/>
@@ -193,7 +195,9 @@
 		graph={state.graph}
 		dynamics={session.dynamics}
 		selection={session.selection}
+		focusedNode={session.focusedNode}
 		onselect={(index, additive) => session.selectFromTable(index, additive)}
+		onfocus={(index) => session.focusNode(index)}
 	/>
 </div>
 

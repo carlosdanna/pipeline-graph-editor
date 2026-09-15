@@ -37,6 +37,7 @@ function makeHarness() {
 	const tree = new NodeQuadtree(fixture.graph, positions);
 
 	const calls = { schedule: 0, positionsWritten: 0, dragStarted: 0, dragEnded: 0 };
+	const picked: number[] = [];
 
 	const scene: InteractionScene = { positions, anchors, tree };
 	const controller = new InteractionController({
@@ -46,7 +47,8 @@ function makeHarness() {
 		schedule: () => calls.schedule++,
 		positionsWritten: () => calls.positionsWritten++,
 		dragStarted: () => calls.dragStarted++,
-		dragEnded: () => calls.dragEnded++
+		dragEnded: () => calls.dragEnded++,
+		nodePicked: (index) => picked.push(index)
 	});
 
 	let lastX = 0;
@@ -98,7 +100,7 @@ function makeHarness() {
 	};
 
 	return {
-		positions, viewport, selection, tree, controller, calls,
+		positions, viewport, selection, tree, controller, calls, picked,
 		down, move, up, centreOf, emptyPoint, clearOfNodes
 	};
 }
@@ -112,6 +114,27 @@ console.log('\n=== picking ===\n');
 	check('click on a node selects exactly it', h.selection.nodeCount === 1 && h.selection.hasNode(42),
 		`count ${h.selection.nodeCount}, primary ${h.selection.primaryNode}`);
 	check('click on a node sets the primary', h.selection.primaryNode === 42);
+	// Keyboard focus follows the pointer, so an arrow key after a click continues
+	// from what was clicked rather than from wherever focus was left.
+	check('click on a node reports the pick for keyboard focus',
+		h.picked.length === 1 && h.picked[0] === 42, `picked [${h.picked.join(', ')}]`);
+}
+
+{
+	// Picking must be reported for shift-clicks too, or focus would lag behind a
+	// multi-selection built with the pointer.
+	const h = makeHarness();
+	const a = h.centreOf(11);
+	const b = h.centreOf(12);
+	h.down(a[0], a[1]); h.up(a[0], a[1]);
+	h.down(b[0], b[1], true); h.up(b[0], b[1]);
+	check('shift-click also reports the pick',
+		h.picked.length === 2 && h.picked[1] === 12, `picked [${h.picked.join(', ')}]`);
+
+	// Clicking empty space is not a pick; focus should stay where it was.
+	const [ex, ey] = h.emptyPoint();
+	h.down(ex, ey); h.up(ex, ey);
+	check('clicking empty space reports no pick', h.picked.length === 2);
 }
 
 {

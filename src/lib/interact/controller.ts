@@ -55,6 +55,12 @@ export interface InteractionHost {
 	dragStarted(): void;
 	/** A drag finished; the spatial index is stale and should be rebuilt. */
 	dragEnded(): void;
+	/**
+	 * A node was picked with the pointer. Keyboard focus follows it, so that an
+	 * arrow key after a click continues from what was clicked rather than from
+	 * wherever focus happened to be left.
+	 */
+	nodePicked(index: number): void;
 }
 
 type Gesture = 'none' | 'pan' | 'marquee' | 'drag-nodes';
@@ -148,6 +154,8 @@ export class InteractionController implements InputTarget {
 		);
 
 		if (hit.node >= 0) {
+			this.#host.nodePicked(hit.node);
+
 			if (event.shiftKey) {
 				// Toggling is a decision, not the start of a move: shift-dragging
 				// a node would be ambiguous against the additive marquee.

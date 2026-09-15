@@ -25,10 +25,17 @@
 		graph: PipelineGraph;
 		dynamics: DynamicsStore;
 		selection: SelectionStore;
+		/**
+		 * The node the keyboard is on. Shared with the graph: there is one focus,
+		 * seen from two places, so arrowing here moves the canvas and arrowing
+		 * there scrolls this list.
+		 */
+		focusedNode: number;
 		onselect: (index: number, additive: boolean) => void;
+		onfocus: (index: number) => void;
 	}
 
-	let { graph, dynamics, selection, onselect }: Props = $props();
+	let { graph, dynamics, selection, focusedNode, onselect, onfocus }: Props = $props();
 
 	const MIN_HEIGHT = 80;
 	const MAX_HEIGHT_FRACTION = 0.8;
@@ -38,6 +45,7 @@
 	let scrollTop = $state(0);
 	let viewportHeight = $state(0);
 	let scroller: HTMLElement | null = $state(null);
+	let pane: HTMLElement | null = $state(null);
 
 	const rowCount = $derived(graph.nodes.length);
 	const view = $derived(windowFor(scrollTop, viewportHeight, rowCount));
@@ -94,19 +102,91 @@
 	}
 
 	/**
-	 * Canvas selection scrolls the list.
+	 * Focus moving anywhere scrolls the list to it.
+	 *
+	 * Covers both halves of the bidirectional link, because a pointer pick on the
+	 * canvas moves focus too: clicking a node scrolls the table to its row, and
+	 * arrowing through the graph drags the list along.
 	 *
 	 * Reads position from the element rather than from `scrollTop`/`viewportHeight`
 	 * on purpose: those are reactive, and depending on them here would re-run
 	 * this effect on every scroll and fight the user.
 	 */
 	$effect(() => {
-		const primary = selection.primaryNode;
-		if (primary < 0 || !scroller) return;
+		const target = focusedNode;
+		if (target < 0 || !scroller) return;
 
-		const next = scrollToIndex(primary, scroller.scrollTop, scroller.clientHeight, rowCount);
+		const next = scrollToIndex(target, scroller.scrollTop, scroller.clientHeight, rowCount);
 		if (next !== null) scroller.scrollTop = next;
 	});
+
+	/**
+	 * Moves real DOM focus onto the focused row, but only when focus is already
+	 * inside this pane — otherwise arrowing through the *graph* would yank focus
+	 * out of the canvas and into the table on every step.
+	 */
+	$effect(() => {
+		const target = focusedNode;
+		if (target < 0 || !pane) return;
+		if (!pane.contains(document.activeElement)) return;
+
+		const row = pane.querySelector<HTMLElement>(`[data-row="${target}"]`);
+		if (row && row !== document.activeElement) row.focus({ preventScroll: true });
+	});
+
+	/**
+	 * Row navigation. Linear here, unlike the graph, because a list *is* linear —
+	 * the useful thing about the table is precisely that it imposes a total order
+	 * on a graph that has none, and it is how every stage is reachable from the
+	 * keyboard whatever the arrow keys can reach on the canvas.
+	 */
+	function onGridKeyDown(event: KeyboardEvent): void {
+		if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+		const page = Math.max(1, Math.floor(viewportHeight / ROW_HEIGHT) - 1);
+		const current = focusedNode >= 0 ? focusedNode : view.first;
+		let next = current;
+
+		switch (event.key) {
+			case 'ArrowDown':
+				next = current + 1;
+				break;
+			case 'ArrowUp':
+				next = current - 1;
+				break;
+			case 'PageDown':
+				next = current + page;
+				break;
+			case 'PageUp':
+				next = current - page;
+				break;
+			case 'Home':
+				next = 0;
+				break;
+			case 'End':
+				next = rowCount - 1;
+				break;
+			default:
+				return;
+		}
+
+		event.preventDefault();
+		// Clamped rather than wrapped: running off the end of a 10,000-row list
+		// and reappearing at the top is disorienting in exactly the way the graph
+		// navigation avoids.
+		next = Math.max(0, Math.min(rowCount - 1, next));
+		if (next !== current) onfocus(next);
+	}
+
+	/**
+	 * Roving tabindex. When focus is nowhere in particular the first rendered row
+	 * is tabbable, so Tab always has somewhere to land in the list.
+	 */
+	const tabbableRow = $derived(
+		focusedNode >= view.first && focusedNode < view.first + view.count
+			? focusedNode
+			: (rows[0]?.index ?? -1)
+	);
 
 	// --- Resize --------------------------------------------------------------
 	//
@@ -151,7 +231,7 @@
 	4,000 of 10,000 is row 4,000. Phase 8 extends this with focus management and
 	the parallel tree for the canvas.
 -->
-<section class="pane" style:height="{paneHeight}px">
+<section class="pane" style:height="{paneHeight}px" bind:this={pane}>
 	<!--
 		The handle is a separator, not a button. Keyboard resizing lands in
 		phase 8 along with the rest of the keyboard story.
@@ -168,7 +248,20 @@
 		onpointercancel={onHandleUp}
 	></div>
 
-	<div class="grid" role="grid" aria-label="Pipeline stages" aria-rowcount={rowCount + 1}>
+	<!--
+		`tabindex="-1"` on the grid itself, not 0: the tab order should land on the
+		focused *row*, via the roving tabindex below, rather than on the container.
+		The grid still needs to be focusable so that a click inside it has
+		somewhere for focus to settle.
+	-->
+	<div
+		class="grid"
+		role="grid"
+		tabindex="-1"
+		aria-label="Pipeline stages"
+		aria-rowcount={rowCount + 1}
+		onkeydown={onGridKeyDown}
+	>
 		<header role="row" aria-rowindex={1}>
 			<span class="cell index" role="columnheader">#</span>
 			<span class="cell" role="columnheader">stage</span>
@@ -186,6 +279,7 @@
 						top={row.top}
 						selected={row.selected}
 						primary={row.primary}
+						tabbable={row.index === tabbableRow}
 						{dynamics}
 						{onselect}
 					/>
@@ -234,6 +328,7 @@
 	 * table, and a grid whose children include a separator is a lie.
 	 */
 	.grid {
+		outline: none;
 		display: flex;
 		flex-direction: column;
 		flex: 1;

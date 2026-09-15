@@ -1206,3 +1206,168 @@ viewport, a negative `scrollTop` (macOS overscroll bounce reports one), and a
 - Keyboard navigation of the list is phase 8. Rows carry `tabindex="-1"` and
   respond to Enter and Space, but nothing moves focus between them yet, and the
   resize handle cannot be driven from the keyboard.
+
+---
+
+## Phase 8 — accessibility and keyboard
+
+### What landed
+
+```
+src/lib/a11y/navigate.ts              arrow-key movement through the graph
+src/lib/a11y/describe.ts              what a node and an edge are called out loud
+src/lib/a11y/tree.ts                  which nodes and edges the tree describes
+src/lib/a11y/shortcuts.ts             the key table, as a pure mapping
+src/lib/components/AccessibleGraph.svelte   the parallel off-screen tree
+```
+
+`TablePane` gained row navigation and a roving tabindex. `HybridRenderer` took
+the keydown listener alongside its pointer and wheel ones, and focuses the
+surface on click. `FixtureState` carries `layers`. `SelectionStore` was already
+reactive from phase 7.
+
+### The decision that took the phase: up and down walk the *layer*
+
+I built the obvious model first — left and right follow edges, up and down move
+between siblings, nodes sharing a parent. Every arrow key then moves between
+genuinely connected nodes, which is what the brief asks for. It does not work,
+and it took measurement rather than use to see why.
+
+**"Nearest sibling above" is not a total order.** Sibling sets differ from node
+to node, so the relation is not invertible and some nodes are never any node's
+nearest anything. Measured on the 10,000-node fixture:
+
+| model                          | up-then-down retraces | reachable by arrows |
+|--------------------------------|-----------------------|---------------------|
+| siblings, shared-parent first  | 74.6%                 | 99.04%              |
+| siblings, symmetric union      | 74.6%                 | 99.04%              |
+| **same layer, sorted**         | **100%**              | **100%**            |
+
+The middle row is a bug I found and fixed on the way: the first `siblings()`
+took shared-parent peers and only *fell back* to shared-child peers when there
+were none, which made the relation asymmetric — X could consider Y a sibling
+while Y never considered X one. 42 stages were reachable from nothing at all.
+Unioning both makes it symmetric by construction. It did not help reachability
+(it went to 96 unreachable, because larger sibling sets mean more nodes get
+skipped over), which is what finally made me stop patching the model.
+
+A layer *is* a total order once sorted by (vertical centre, then index). Every
+node has exactly one predecessor and one successor in it, so down-then-up always
+returns, and walking a layer covers all of it. Reachability follows: left and
+right enter a layer, up and down exhaust it.
+
+The cost is real and worth saying: two nodes in the same layer are **peers, not
+neighbours** — same depth from the sources, not joined by an edge. Left and
+right remain the edge-following moves. In exchange navigation retraces perfectly
+and no stage is stranded, and it matches what is drawn, because the layout puts
+a layer in a column and up and down move up and down that column.
+
+Left-then-right still only retraces 67.5% of the time, and that one I left
+alone: going downstream and back up to a *different* parent is honest, because
+the node genuinely has several.
+
+### Decisions
+
+**The tree asks `moveFocus` where the arrow keys can go.** First version added
+the focused node's one-hop neighbours and assumed that covered it. Once up and
+down moved to layer peers, 28% of arrow presses had no element to land on. The
+fix is to ask the navigation model rather than to infer it — the tree now calls
+`moveFocus` for all four directions and includes the answers. The invariant is
+enforced where it is stated, and it survives the next change to navigation.
+
+**The tree is bounded, not complete.** At fit-to-screen with 10,000 nodes
+everything is drawn, and a 10,000-item listbox is both the DOM explosion the
+canvas exists to avoid and useless to read. So it describes the focused node, its
+arrow targets, its neighbours, and up to 150 on-screen nodes — and reports the
+real count in its label, so a screen reader is told "44 of 9,000 on screen
+described" rather than being quietly handed a truncated list. Nothing becomes
+unreachable, because every arrow target is always present, so the graph is
+walkable one hop at a time however large it is.
+
+**`aria-live` is off, deliberately.** The feed changes status up to 20,000 times
+a second. Announcing any of it would make the page unusable; announcing some of
+it would be worse, because the user could not tell what they had missed. Live
+values are read when a node is focused — on demand, the only rate a human can
+absorb.
+
+**The canvas and the DOM node layer are `aria-hidden`.** They describe the same
+nodes the tree does. Without this a screen reader reads every visible stage
+twice: once as a proper labelled option, once as loose text from the node
+elements. The tree is the single accessible representation of what is drawn.
+
+**Throughput is spoken, not abbreviated.** "12.4k" exists because a node is 176
+pixels wide, which is not a constraint speech has. `spokenThroughput` says
+"12.4 thousand records per second", and a stopped stage is "idle" rather than
+"0 records per second".
+
+**The table is the complete index.** Graph arrows are for local traversal; the
+list imposes a total order on a graph that has none. It now has its own row
+navigation — up, down, page up, page down, home, end — sharing the *same*
+focused node as the graph, so arrowing in the table pans the canvas and arrowing
+in the graph scrolls the table. One focus, two views.
+
+**The keydown listener is attached by the renderer**, next to the pointer and
+wheel ones, rather than bound in markup. Input plumbing lives in one place and
+all four are added and removed together. It also sidestepped a Svelte a11y
+warning honestly rather than by suppressing it.
+
+### What surprised me
+
+**Svelte's a11y checker caught three real errors, not three false positives.**
+`role="grid"` on a `<section>` that also contains a resize separator and a
+footer — a grid whose children include a separator is a lie, so the role moved
+to an inner element. `role="application"` flagged as non-interactive, which
+pushed the keydown listener to where the other input listeners already were.
+And an interactive role without a tabindex. I have spent enough time overriding
+a11y lints to have expected at least one to be noise.
+
+**Measuring navigation is what found the bug.** Using it felt fine — arrow keys
+moved, focus went somewhere sensible, nothing obviously broke. The 74%
+retrace rate and the 42 stranded nodes are invisible to anyone who has not
+walked all 10,000 of them. A property you can only check exhaustively is a
+property you will ship broken.
+
+**The accessible tree turned out to constrain the design, not decorate it.**
+Deciding what it contains forced the navigation model to be *complete* — if the
+arrow keys can reach everything, the tree can be bounded and still be enough.
+The two requirements only work together.
+
+### Verified
+
+`npm run verify:a11y` — 56 checks. 195 across the whole suite.
+
+```
+every move lands on a connected node   39,872 moves at 10k, 0 unconnected, 0 self
+down then up returns to the start      19,920 pairs at 10k, 100.0%
+up goes up and down goes down          19,920 moves, 0 wrong way
+holding one arrow terminates           1,600 runs, 0 cycles
+arrow keys reach every stage           10,000/10,000 (100.0%)
+every arrow target is always described 1,200 targets, 0 missing
+```
+
+The shortcut table is asserted key by key, including that Ctrl, Meta and Alt
+combinations are left alone — Ctrl+`-` is the browser's page zoom, and taking it
+would break the one zoom control a low-vision user already knows — and that
+unrelated keys claim nothing.
+
+Cost, per keypress at 10,000 nodes: `moveFocus` 4.98 µs (a linear scan filtered
+by layer, deliberately not indexed), `buildAccessibleTree` 0.051 ms,
+describing 150 nodes 0.029 ms.
+
+### Known limitations, carried forward
+
+- Up and down move between layer peers, which are not edge-connected. Stated
+  above; it is a trade, not an oversight.
+- Left-then-right retraces 67.5% of the time. Following an edge and coming back
+  to a different parent is defensible but not symmetric.
+- The resize handle still cannot be driven from the keyboard. It is a separator
+  with no keyboard affordance, which is the one piece of "full keyboard
+  operation" this phase did not finish.
+- Edges are described but not focusable. They are selectable with the pointer,
+  and the connection list announces them, but there is no keyboard route to
+  selecting one.
+- The tree limit is a count, not a reading budget. 150 short labels and 150 long
+  ones are very different amounts of speech.
+- No screen reader has actually been run against this. Every claim here is about
+  roles, labels and focus order being correct by construction and by test —
+  which is necessary and not sufficient.

@@ -15,7 +15,7 @@ npm run verify   # headless logic checks, see tools/
 
 Decisions and measurements are logged per phase in [NOTES.md](./NOTES.md).
 
-## Current state: phase 7 — table pane
+## Current state: phase 8 — accessibility and keyboard
 
 Fixture generator producing DAG-shaped pipelines at 50 / 500 / 2,000 / 10,000
 nodes, a structural validator, ELK layout in a dedicated Web Worker with stable
@@ -61,3 +61,11 @@ as elements whether the list holds a hundred or a million, and each row
 subscribes to its own node, so a streaming update repaints one row. Selection is
 bidirectional — clicking a row selects it and pans the canvas there, and
 selecting on the canvas scrolls the list to it.
+
+A parallel off-screen DOM tree describes what is drawn, with real ARIA roles and
+labels; the canvas and the node layer are hidden from assistive technology so
+each stage is announced once. Arrow keys move between connected stages (left and
+right follow the flow, up and down walk the layer), Enter selects, Escape
+clears, `+`/`-` zoom and `0` fits. The table has its own row navigation, sharing
+one focused node with the graph. Arrow navigation reaches 100% of stages at
+every fixture size and retraces exactly.
