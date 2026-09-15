@@ -26,7 +26,7 @@
 
 <div class="app">
 	<header>
-		<h1>Pipeline graph editor <span class="phase">phase 8 — accessibility and keyboard</span></h1>
+		<h1>Pipeline graph editor <span class="phase">phase 9 — tests</span></h1>
 
 		<span class="status" data-phase={session.layoutPhase}>
 			{#if session.layoutPhase === 'running'}
