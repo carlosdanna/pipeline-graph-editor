@@ -39,6 +39,22 @@ export const DATA_TYPE_COLOR: Record<DataType, string> = {
 	errors: '#c2635e'
 };
 
+/**
+ * Selection accents.
+ *
+ * Deliberately the same hue as the `source` node kind rather than a fifth
+ * colour: selection is a transient state, and inventing a new colour for it
+ * would compete with the four data-type colours that carry real information.
+ */
+export const SELECTION = {
+	/** Ring drawn around a selected node, outside its bounds. */
+	node: '#4fb3ff',
+	/** A selected edge, drawn over the bucketed pass at full opacity. */
+	edge: '#9ad4ff',
+	marqueeFill: 'rgb(79 179 255 / 0.09)',
+	marqueeStroke: '#4fb3ff'
+} as const;
+
 /** Compact rate, e.g. 1234 -> "1.2k/s". Used in node headers and, later, the table. */
 export function formatThroughput(recordsPerSecond: number): string {
 	if (recordsPerSecond <= 0) return '—';

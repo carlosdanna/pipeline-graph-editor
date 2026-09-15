@@ -9,18 +9,24 @@
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"verify:interact": "npx esbuild tools/verify-interact.ts --bundle --format=esm --platform=node --alias:'$lib'=./src/lib --banner:js='globalThis.$state=(v)=>v;' --outfile=node_modules/.verify/verify-interact.mjs --log-level=warning && node node_modules/.verify/verify-interact.mjs",
+		"verify:gestures": "npx esbuild tools/verify-gestures.ts --bundle --format=esm --platform=node --alias:'$lib'=./src/lib --banner:js='globalThis.$state=(v)=>v;' --outfile=node_modules/.verify/verify-gestures.mjs --log-level=warning && node node_modules/.verify/verify-gestures.mjs",
+		"verify:draw": "npx esbuild tools/verify-draw.ts --bundle --format=esm --platform=node --alias:'$lib'=./src/lib --banner:js='globalThis.$state=(v)=>v;' --outfile=node_modules/.verify/verify-draw.mjs --log-level=warning && node node_modules/.verify/verify-draw.mjs",
+		"verify": "npm run verify:interact && npm run verify:gestures && npm run verify:draw"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-static": "^3.0.10",
 		"@sveltejs/kit": "^2.63.0",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
+		"@types/d3-quadtree": "^3.0.6",
 		"svelte": "^5.56.1",
 		"svelte-check": "^4.6.0",
 		"typescript": "^6.0.3",
 		"vite": "^8.0.16"
 	},
 	"dependencies": {
+		"d3-quadtree": "^3.0.1",
 		"elkjs": "^0.12.0"
 	}
 }

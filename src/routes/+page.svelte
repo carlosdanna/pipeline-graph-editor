@@ -24,7 +24,7 @@
 
 <div class="app">
 	<header>
-		<h1>Pipeline graph editor <span class="phase">phase 3 — hybrid renderer</span></h1>
+		<h1>Pipeline graph editor <span class="phase">phase 4 — interaction</span></h1>
 
 		<span class="status" data-phase={session.layoutPhase}>
 			{#if session.layoutPhase === 'running'}
@@ -58,6 +58,13 @@
 		<button type="button" disabled={session.busy} onclick={() => session.runBenchmark()}>
 			benchmark all
 		</button>
+		<button
+			type="button"
+			disabled={session.selection.nodeCount === 0}
+			onclick={() => session.fitSelection()}
+		>
+			fit selection
+		</button>
 
 		<span class="badge" class:ok={state.validation.ok} class:bad={!state.validation.ok}>
 			{state.validation.ok ? 'valid DAG' : `${state.validation.errors.length} errors`}
@@ -70,6 +77,14 @@
 		<div><dt>layers</dt><dd>{stats.layerCount}</dd></div>
 		<div><dt>generate</dt><dd>{ms(state.generationMs)}</dd></div>
 		<div><dt>placeholder</dt><dd>{ms(state.placeholderMs)}</dd></div>
+		<div><dt>quadtree</dt><dd>{session.treeBuildMs === null ? '—' : ms(session.treeBuildMs)}</dd></div>
+		<div class="sep">
+			<dt>selected</dt>
+			<dd>
+				{session.selection.nodeCount.toLocaleString()} nodes,
+				{session.selection.edgeCount.toLocaleString()} edges
+			</dd>
+		</div>
 		{#if session.lastRun}
 			{@const run = session.lastRun}
 			<div class="sep"><dt>last layout</dt><dd>{run.mode}</dd></div>
@@ -112,12 +127,18 @@
 		</table>
 	{/if}
 
+	<p class="hint">
+		drag to pan · wheel to zoom · click a node or edge to select · shift-click to toggle ·
+		shift-drag empty space to marquee · drag a node to move it
+	</p>
+
 	<main>
 		<GraphCanvas
 			graph={state.graph}
 			index={state.index}
 			positions={state.positions}
 			dynamics={state.dynamics}
+			selection={session.selection}
 			geometryVersion={session.positionsVersion}
 			renderer={session.renderer}
 		/>
@@ -252,6 +273,15 @@
 
 	.warn {
 		color: #fbbf24;
+	}
+
+	.hint {
+		margin: 0;
+		padding: 6px 16px;
+		font-size: 10.5px;
+		color: var(--text-muted);
+		border-bottom: 1px solid var(--border);
+		background: var(--surface);
 	}
 
 	.errors {

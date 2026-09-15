@@ -1,6 +1,7 @@
 import type { GraphIndex } from '$lib/graph/indexing';
 import { graphBounds, type PositionStore } from '$lib/graph/positions';
-import type { PipelineGraph } from '$lib/graph/types';
+import type { PipelineGraph, Rect } from '$lib/graph/types';
+import type { SelectionStore } from '$lib/interact/selection.svelte';
 import type { EdgeBuckets } from './edge-buckets';
 import { FrameScheduler } from './frame';
 import type { PerfMonitor } from './perf.svelte';
@@ -24,9 +25,17 @@ import { WHEEL_ZOOM_RATE, type Viewport } from './viewport';
  *  - None of this needs to be reactive, and making it reactive would put proxy
  *    overhead on the hottest path in the app.
  *
+ * What it deliberately does NOT own, from phase 4, is what a gesture *means*.
+ * DOM events are normalised here — origin-corrected into surface-local CSS
+ * pixels, with the delta since the last move — and handed to an `InputTarget`.
+ * The split is not tidiness: it is what lets the gesture logic be exercised
+ * without a browser, and it keeps the layout-read ban enforceable, because the
+ * half of the code that decides things has no element to measure.
+ *
  * Note that the node layer is `pointer-events: none`. All interaction goes
- * through the surface and (from phase 4) the quadtree, so the interaction model
- * is identical whether nodes happen to be DOM elements or canvas pixels.
+ * through the surface and the quadtree, never through a node's own event
+ * target, so the interaction model is identical whether nodes happen to be DOM
+ * elements or canvas pixels.
  */
 
 export interface Scene {
@@ -34,6 +43,34 @@ export interface Scene {
 	readonly index: GraphIndex;
 	readonly positions: PositionStore;
 	readonly buckets: EdgeBuckets;
+	readonly selection: SelectionStore;
+}
+
+/**
+ * A pointer event, already reduced to what a gesture needs.
+ *
+ * `sx`/`sy` are surface-local CSS pixels — the origin correction has already
+ * happened, using a rectangle cached outside the pointer path. `dx`/`dy` are
+ * the screen-space delta since the previous move, which is what panning wants
+ * and which is why panning needs no origin at all.
+ */
+export interface PointerInput {
+	readonly sx: number;
+	readonly sy: number;
+	readonly dx: number;
+	readonly dy: number;
+	readonly shiftKey: boolean;
+	readonly button: number;
+}
+
+export interface InputTarget {
+	onPointerDown(event: PointerInput): void;
+	onPointerMove(event: PointerInput): void;
+	onPointerUp(event: PointerInput): void;
+	/** Gesture abandoned — pointer cancelled, or the window lost focus. */
+	cancel(): void;
+	/** Overlay the gesture wants drawn, in graph units. Read once per frame. */
+	readonly marquee: Rect | null;
 }
 
 export class HybridRenderer {
@@ -46,6 +83,7 @@ export class HybridRenderer {
 	#ctx: CanvasRenderingContext2D | null = null;
 	#layer: HTMLElement | null = null;
 	#surface: HTMLElement | null = null;
+	#input: InputTarget | null = null;
 
 	#scene: Scene | null = null;
 	#cssWidth = 0;
@@ -56,7 +94,7 @@ export class HybridRenderer {
 	#left = 0;
 	#top = 0;
 
-	#dragging = false;
+	#pointerId: number | null = null;
 	#lastPointerX = 0;
 	#lastPointerY = 0;
 	#pendingFit = false;
@@ -76,9 +114,21 @@ export class HybridRenderer {
 		this.schedule();
 	}
 
+	/** Hands gesture interpretation to the interaction controller. */
+	setInput(target: InputTarget): void {
+		this.#input = target;
+	}
+
 	/** Frame the whole graph on the next draw, once sizes are known. */
 	requestFit(): void {
 		this.#pendingFit = true;
+		this.schedule();
+	}
+
+	/** Frame a specific region. Used by "fit selection". */
+	fitTo(bounds: Rect): void {
+		if (this.#cssWidth === 0) this.#measure();
+		this.viewport.fit(bounds, this.#cssWidth, this.#cssHeight);
 		this.schedule();
 	}
 
@@ -120,11 +170,12 @@ export class HybridRenderer {
 		const remeasure = () => this.#measure();
 		window.addEventListener('resize', remeasure, { passive: true });
 		window.addEventListener('scroll', remeasure, { passive: true, capture: true });
+		window.addEventListener('blur', this.#onBlur);
 
 		element.addEventListener('pointerdown', this.#onPointerDown);
 		element.addEventListener('pointermove', this.#onPointerMove);
 		element.addEventListener('pointerup', this.#onPointerUp);
-		element.addEventListener('pointercancel', this.#onPointerUp);
+		element.addEventListener('pointercancel', this.#onPointerCancel);
 		// Not passive: zooming must preventDefault to stop the page scrolling.
 		element.addEventListener('wheel', this.#onWheel, { passive: false });
 
@@ -134,10 +185,11 @@ export class HybridRenderer {
 			observer.disconnect();
 			window.removeEventListener('resize', remeasure);
 			window.removeEventListener('scroll', remeasure, { capture: true });
+			window.removeEventListener('blur', this.#onBlur);
 			element.removeEventListener('pointerdown', this.#onPointerDown);
 			element.removeEventListener('pointermove', this.#onPointerMove);
 			element.removeEventListener('pointerup', this.#onPointerUp);
-			element.removeEventListener('pointercancel', this.#onPointerUp);
+			element.removeEventListener('pointercancel', this.#onPointerCancel);
 			element.removeEventListener('wheel', this.#onWheel);
 			dprWatcher();
 			this.#scheduler.cancel();
@@ -147,35 +199,73 @@ export class HybridRenderer {
 
 	// --- Input ---------------------------------------------------------------
 
-	#onPointerDown = (event: PointerEvent): void => {
-		if (event.button !== 0) return;
-		this.#dragging = true;
+	/**
+	 * Normalises a DOM pointer event. The only place client coordinates are
+	 * turned into surface coordinates, and it uses the cached origin — so no
+	 * pointer handler in this app ever triggers a layout.
+	 */
+	#normalise(event: PointerEvent): PointerInput {
+		const dx = event.clientX - this.#lastPointerX;
+		const dy = event.clientY - this.#lastPointerY;
 		this.#lastPointerX = event.clientX;
 		this.#lastPointerY = event.clientY;
+
+		return {
+			sx: event.clientX - this.#left,
+			sy: event.clientY - this.#top,
+			dx,
+			dy,
+			shiftKey: event.shiftKey,
+			button: event.button
+		};
+	}
+
+	#onPointerDown = (event: PointerEvent): void => {
+		if (event.button !== 0 && event.button !== 1) return;
+		// Stops middle-click autoscroll, and stops a drag from selecting page text.
+		event.preventDefault();
+
+		this.#lastPointerX = event.clientX;
+		this.#lastPointerY = event.clientY;
+		this.#pointerId = event.pointerId;
 		(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+
+		this.#input?.onPointerDown(this.#normalise(event));
 	};
 
 	#onPointerMove = (event: PointerEvent): void => {
-		if (!this.#dragging) return;
-		// Deltas between events, so panning needs no knowledge of where the
-		// surface is on screen — and therefore no layout read at all.
-		this.viewport.panBy(
-			event.clientX - this.#lastPointerX,
-			event.clientY - this.#lastPointerY
-		);
-		this.#lastPointerX = event.clientX;
-		this.#lastPointerY = event.clientY;
-		this.schedule();
+		if (this.#pointerId !== event.pointerId) return;
+		this.#input?.onPointerMove(this.#normalise(event));
 	};
 
 	#onPointerUp = (event: PointerEvent): void => {
-		if (!this.#dragging) return;
-		this.#dragging = false;
-		const element = event.currentTarget as HTMLElement;
-		if (element.hasPointerCapture(event.pointerId)) {
-			element.releasePointerCapture(event.pointerId);
+		if (this.#pointerId !== event.pointerId) return;
+		this.#releaseCapture(event);
+		this.#input?.onPointerUp(this.#normalise(event));
+	};
+
+	#onPointerCancel = (event: PointerEvent): void => {
+		if (this.#pointerId !== event.pointerId) return;
+		this.#releaseCapture(event);
+		this.#input?.cancel();
+	};
+
+	#onBlur = (): void => {
+		// A drag interrupted by an alt-tab never sees a pointerup, and would
+		// otherwise resume the next time the pointer moved over the surface.
+		if (this.#pointerId !== null) {
+			this.#pointerId = null;
+			this.#input?.cancel();
 		}
 	};
+
+	#releaseCapture(event: PointerEvent): void {
+		this.#pointerId = null;
+		const element = event.currentTarget as HTMLElement | null;
+		if (element?.hasPointerCapture(event.pointerId)) {
+			element.releasePointerCapture(event.pointerId);
+		}
+	}
 
 	#onWheel = (event: WheelEvent): void => {
 		event.preventDefault();
@@ -265,6 +355,8 @@ export class HybridRenderer {
 			index: scene.index,
 			positions: scene.positions,
 			buckets: scene.buckets,
+			selection: scene.selection,
+			marquee: this.#input?.marquee ?? null,
 			viewport: this.viewport,
 			cssWidth: this.#cssWidth,
 			cssHeight: this.#cssHeight,

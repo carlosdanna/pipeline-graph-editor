@@ -1,14 +1,15 @@
 import { portOffsetY } from '$lib/graph/generate';
 import type { GraphIndex } from '$lib/graph/indexing';
 import type { PositionStore } from '$lib/graph/positions';
-import { DATA_TYPES, type PipelineGraph } from '$lib/graph/types';
+import { DATA_TYPES, type PipelineGraph, type Rect } from '$lib/graph/types';
+import type { SelectionStore } from '$lib/interact/selection.svelte';
 import type { EdgeBuckets } from './edge-buckets';
 import { createEdgeGeometry, writeEdgeGeometry } from './edge-geometry';
-import { DATA_TYPE_COLOR, PALETTE } from './theme';
+import { DATA_TYPE_COLOR, PALETTE, SELECTION } from './theme';
 
 /**
- * Everything drawn on the canvas: the background grid, every edge, and the port
- * dots that edges terminate on.
+ * Everything drawn on the canvas: the background grid, every edge, the port
+ * dots that edges terminate on, and — from phase 4 — selection and the marquee.
  *
  * Nodes are NOT here — they are DOM elements in a CSS-transformed layer above
  * this canvas, sharing the same transform. Phase 5 adds a canvas fallback for
@@ -19,6 +20,11 @@ import { DATA_TYPE_COLOR, PALETTE } from './theme';
  * same numbers is the only way to guarantee they never disagree. It also strips
  * ~4 elements off every node, which is 8,000 fewer DOM nodes at the 2,000-node
  * fixture.
+ *
+ * Selection is drawn here too, rather than as a CSS class on the node elements.
+ * That is what lets a marquee change the selection at 60fps without touching
+ * Svelte's reactivity at all — and it means selection rendering does not change
+ * when phase 5 stops putting nodes in the DOM.
  */
 
 export interface SceneInput {
@@ -26,6 +32,9 @@ export interface SceneInput {
 	readonly index: GraphIndex;
 	readonly positions: PositionStore;
 	readonly buckets: EdgeBuckets;
+	readonly selection: SelectionStore;
+	/** Live marquee box in graph units, or null. */
+	readonly marquee: Rect | null;
 	readonly viewport: { x: number; y: number; k: number };
 	readonly cssWidth: number;
 	readonly cssHeight: number;
@@ -60,7 +69,11 @@ export function gridStep(k: number): number {
 }
 
 const EDGE_WIDTH_SCREEN_PX = 1.4;
+const SELECTED_EDGE_WIDTH_SCREEN_PX = 2.6;
 const PORT_SIZE_SCREEN_PX = 5;
+/** How far outside a node's bounds its selection ring sits, in screen pixels. */
+const SELECTION_RING_GAP_PX = 3;
+const SELECTION_RING_WIDTH_PX = 1.6;
 
 // Reused across every edge of every frame. See edge-geometry.ts.
 const geometry = createEdgeGeometry();
@@ -91,7 +104,10 @@ export function drawScene(ctx: CanvasRenderingContext2D, input: SceneInput): Sce
 	);
 
 	drawEdges(ctx, input);
+	drawSelectedEdges(ctx, input);
 	const visibleNodes = drawPortsAndCountVisible(ctx, input);
+	drawNodeSelection(ctx, input);
+	drawMarquee(ctx, input);
 
 	ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
@@ -170,9 +186,47 @@ function drawEdges(ctx: CanvasRenderingContext2D, input: SceneInput): void {
 }
 
 /**
+ * Selected edges, redrawn over the bucketed pass at full opacity.
+ *
+ * Drawing them a second time rather than skipping them in the first pass keeps
+ * the colour buckets untouched — they are built once per graph and would
+ * otherwise have to be rebuilt on every selection change. The overdraw is one
+ * extra stroke of however many edges are selected, which is bounded by what
+ * someone can actually pick.
+ *
+ * The scan over `edgeFlags` is skipped entirely when nothing is selected, which
+ * is the common case and the one that must stay free.
+ */
+function drawSelectedEdges(ctx: CanvasRenderingContext2D, input: SceneInput): void {
+	const { graph, index, positions, selection, viewport } = input;
+	if (selection.edgeCount === 0) return;
+
+	const flags = selection.edgeFlags;
+	ctx.strokeStyle = SELECTION.edge;
+	ctx.lineWidth = SELECTED_EDGE_WIDTH_SCREEN_PX / viewport.k;
+	ctx.beginPath();
+
+	for (let e = 0; e < flags.length; e++) {
+		if (flags[e] !== 1) continue;
+		if (!writeEdgeGeometry(geometry, graph, index, positions, e)) continue;
+		ctx.moveTo(geometry.fromX, geometry.fromY);
+		ctx.bezierCurveTo(
+			geometry.c1x,
+			geometry.c1y,
+			geometry.c2x,
+			geometry.c2y,
+			geometry.toX,
+			geometry.toY
+		);
+	}
+
+	ctx.stroke();
+}
+
+/**
  * Draws port dots and, in the same pass, counts how many nodes are on screen.
  *
- * The count is for the HUD only — phase 3 still draws everything. Watching
+ * The count is for the HUD only — phase 4 still draws everything. Watching
  * "visible 40 / 2,000" while the frame time says otherwise is the whole
  * argument for phase 5.
  */
@@ -216,4 +270,53 @@ function drawPortsAndCountVisible(ctx: CanvasRenderingContext2D, input: SceneInp
 	}
 
 	return visible;
+}
+
+/**
+ * A ring around every selected node.
+ *
+ * Drawn *outside* the node bounds, which is what makes one mechanism work for
+ * both render modes: it stays visible under an opaque DOM node element, and it
+ * will stay visible around a canvas-drawn node in phase 5. The gap and the
+ * stroke are specified in screen pixels and divided by the zoom, so the ring
+ * stays legible whether you are at 3x or at 0.02x.
+ */
+function drawNodeSelection(ctx: CanvasRenderingContext2D, input: SceneInput): void {
+	const { graph, positions, selection, viewport } = input;
+	if (selection.nodeCount === 0) return;
+
+	const flags = selection.nodeFlags;
+	const gap = SELECTION_RING_GAP_PX / viewport.k;
+
+	ctx.strokeStyle = SELECTION.node;
+	ctx.lineWidth = SELECTION_RING_WIDTH_PX / viewport.k;
+	ctx.beginPath();
+
+	for (let i = 0; i < flags.length; i++) {
+		if (flags[i] !== 1) continue;
+		const node = graph.nodes[i];
+		ctx.rect(
+			positions.x[i] - gap,
+			positions.y[i] - gap,
+			node.width + gap * 2,
+			node.height + gap * 2
+		);
+	}
+
+	ctx.stroke();
+}
+
+/** The live marquee box. In graph units, so a mid-drag zoom keeps it over the same nodes. */
+function drawMarquee(ctx: CanvasRenderingContext2D, input: SceneInput): void {
+	const { marquee, viewport } = input;
+	if (!marquee) return;
+
+	ctx.fillStyle = SELECTION.marqueeFill;
+	ctx.fillRect(marquee.x, marquee.y, marquee.width, marquee.height);
+
+	ctx.strokeStyle = SELECTION.marqueeStroke;
+	ctx.lineWidth = 1 / viewport.k;
+	ctx.setLineDash([4 / viewport.k, 3 / viewport.k]);
+	ctx.strokeRect(marquee.x, marquee.y, marquee.width, marquee.height);
+	ctx.setLineDash([]);
 }

@@ -484,3 +484,228 @@ What *is* now verified, which was not before: the worker runs ELK correctly in a
 browser-shaped scope, end to end, through the real protocol. The HUD numbers —
 actual FPS, actual frame time including rasterisation — can only come from your
 browser.
+
+---
+
+## Phase 4 — interaction
+
+### What landed
+
+```
+src/lib/interact/quadtree.ts         d3-quadtree over node bounds
+src/lib/interact/bezier.ts           adaptive distance-to-cubic
+src/lib/interact/hit-test.ts         picking: nodes, edges, marquee-implied edges
+src/lib/interact/selection.svelte.ts flag arrays + a reactive summary
+src/lib/interact/controller.ts       the gesture state machine
+```
+
+`hybrid-renderer.ts` gave up its pan logic and became purely DOM plumbing.
+`scene.ts` gained selection rings, a selected-edge pass and the marquee box.
+`session.svelte.ts` owns the quadtree and its rebuild policy.
+
+### The binding, decided with you
+
+```
+empty + drag        pan                 node + drag         move the selection
+empty + shift-drag  marquee (additive)  node + shift-click  toggle
+empty + click       clear               edge + click        select the edge
+middle-drag         pan, always         edge + drag         pan
+```
+
+Pan keeps the unmodified left-drag because at 10,000 nodes navigation is the
+thing you do constantly and selection is the thing you do occasionally. The
+cost is that a marquee which *replaces* the selection is not reachable in one
+gesture — you shift-drag, then click empty space to reset.
+
+### Decisions
+
+**The quadtree stores node indices, not node objects.** `d3-quadtree` only
+touches its datum through the x/y accessors, so the datum can be the integer
+index and the accessors can read straight out of the position Float32Arrays.
+Inserting `{id, x, y}` records instead would allocate a 10,000-object shadow of
+the graph that exists purely to be clicked on — the exact pointer-chasing the
+phase 1 position layout was chosen to avoid.
+
+**d3-quadtree indexes points; our nodes are rectangles.** A node is indexed by
+its top-left corner, so every query is widened by the largest node's size before
+pruning and every survivor is re-tested against its real bounds. Verified
+exhaustively against a brute-force scan rather than argued about — see below.
+
+**Selection lives in `Uint8Array` flags, and is drawn on the canvas.** This is
+the phase 4 decision I'd defend hardest, and it is the same shape as the
+structure/dynamics split: bulk per-node data stays out of the proxy, a summary
+crosses into `$state` for the UI. Three consequences:
+
+ - The draw loop asks "is this selected?" with an array read, not a hash lookup
+   through a proxy.
+ - A marquee sweeping the 2,000-node fixture touches Svelte's reactivity
+   **zero** times. Had nodes carried a `.selected` class, every marquee frame
+   would re-evaluate 2,000 class bindings, and the marquee is the one gesture
+   that changes selection at 60fps.
+ - Selection rendering does not change at all in phase 5. It never depended on
+   there being an element, so a canvas-drawn node gets selection for free.
+
+Selection rings are drawn *outside* the node bounds for the same reason — a ring
+under an opaque DOM node would be invisible, a ring around it works in either
+render mode.
+
+**Gesture meaning was split out of the renderer.** `HybridRenderer` now
+normalises DOM events into surface-local coordinates (using the cached origin)
+and hands them to an `InputTarget`; `InteractionController` decides what they
+mean and touches no DOM at all. That is not tidiness — it is what made the
+34-check gesture harness below possible in Node, and it makes the no-layout-read
+rule structurally enforceable, because the half of the code that decides things
+has no element to measure.
+
+**A drag writes straight into the position Float32Arrays.** No new
+`PipelineGraph`, no layout run, and *nothing done to the edges at all*. Edges
+are re-derived from node positions every frame, so they follow a drag for free.
+This is the phase 2 bezier decision paying off exactly as predicted — had ELK's
+orthogonal bend points been stored, every drag frame would have to re-route.
+
+**The quadtree is rebuilt only when geometry settles**: after a layout tween's
+final frame, after a snap, after a drag ends, after a structural change. Never
+per animation frame. The `_done` callback that phase 2 left unused is what this
+hangs off.
+
+### What surprised me
+
+**The bezier hit test was wrong, and the test caught it, not the eye.**
+
+I wrote the distance function with a fixed 16-segment flattening and a
+comfortable-sounding justification ("our edges are shallow near-horizontal
+S-curves"). Checked against a 4,096-segment reference, the worst error was
+**5.76 graph units** against a 10-unit tolerance — more than half the slop, gone
+to chord error. Points sitting exactly *on* the curve read as 0.84 units off it.
+
+The premise was simply false. `controlOffset` caps the horizontal pull at 220
+units, but a layered layout puts columns thousands of units apart vertically, so
+a long edge is a steep, tightly-curved S — the highest-curvature shape in the
+fixture, not the shallowest. I had described the edges I imagined rather than
+the ones the generator makes.
+
+The fix turned out to be better than the thing it replaced. The caller already
+passes a tolerance; that tolerance can set the segment count:
+
+```
+error <= 6 * bend / (8n²)   ->   n = ceil(sqrt(3 * bend / (4 * error)))
+```
+
+where `bend` is the larger of the two second differences of the control polygon
+— two subtractions each. Budget a quarter of the tolerance for chord error and
+the count falls out. Measured on the 500-node fixture:
+
+| zoom | tolerance | segments avg / max | worst error | budget |
+|------|-----------|--------------------|-------------|--------|
+| 3    | 3 u       | 25.5 / 57          | 0.79 u      | 0.83 u |
+| 1    | 10 u      | 14.9 / 33          | 2.31 u      | 2.50 u |
+| 0.25 | 40 u      | 7.8 / 17           | 8.12 u      | 10.0 u |
+| 0.05 | 200 u     | 4.5 / 8            | 24.5 u      | 50.0 u |
+| 0.02 | 500 u     | 4.0 / 5            | 31.3 u      | 125 u  |
+
+Within budget everywhere, and it made edge picking at 10k *faster* (1.64 ms →
+1.48 ms), because zoomed out — where the tolerance is enormous and most picking
+happens — four segments is plenty. A fixed count was wrong in both directions
+simultaneously: too coarse where it mattered, wasteful where it didn't.
+
+**Committing a selection on pointerdown is wrong when edges are dense.** The
+gesture harness failed on a marquee test, and the cause was not the marquee: my
+test happened to press on a point that was within 10px of an edge, so
+pointerdown selected the edge and the marquee never started.
+
+That is not a test artefact. With a 10px pick tolerance at the 10,000-node
+fixture, an edge is within tolerance of most of the canvas. Committing edge
+selection on press meant that *starting a pan usually selected an edge*, and
+*shift-dragging to marquee usually selected an edge instead*. Edge selection now
+waits for release: pressing on an edge begins the same gesture as pressing on
+empty space, and only a press that never moves is treated as having meant the
+edge. Nodes still commit on press, because you have to select a node to drag it.
+
+I would not have found this by clicking around the 50-node fixture, where the
+canvas is mostly empty and the bug is invisible.
+
+**One node selected costs nothing; everything selected costs a whole frame.**
+The `nodeCount === 0` / `edgeCount === 0` guards make the common case exactly
+free, and scanning 10,000 flags for a single selected node is ~5 µs. But a
+full-graph marquee re-strokes every edge in a second pass:
+
+| fixture | selection  | draw (median) | overhead |
+|---------|------------|---------------|----------|
+| 2,000   | none       | 0.46 ms       | —        |
+| 2,000   | 1 node     | 0.45 ms       | +0.00 ms |
+| 2,000   | everything | 0.86 ms       | +0.41 ms |
+| 10,000  | none       | 2.47 ms       | —        |
+| 10,000  | 1 node     | 2.47 ms       | +0.00 ms |
+| 10,000  | everything | 4.62 ms       | +2.15 ms |
+
+Selecting everything at 10k nearly doubles our JavaScript per frame. The marquee
+box itself is two draw calls and free. Stroke count per frame stays flat at 7
+(grid, four data types, selected edges, selection rings) however much is
+selected — the phase 3 batching survives.
+
+These are our JS only, with a stub context; rasterisation is the browser's and
+is not included. They also use the placeholder layered layout, so they are not
+directly comparable to phase 3's ELK-layout figures — only to each other.
+
+**The edge scan has no spatial index and does not need one.** Deliberate: an
+edge index would have to be rebuilt on every drag frame, since moving one node
+invalidates every edge touching it. The control-hull box test rejects nearly all
+14,739 edges with four comparisons, and picking only happens once per click.
+
+### Measured
+
+Correctness, against brute force (`verify-interact.ts`, 4,000 sampled points and
+200 random rectangles per fixture):
+
+```
+findNode   n=50/500/2000/10000    0 mismatches   (~2,400 of 4,000 are hits)
+queryRect  n=50/500/2000/10000    0 mismatches
+coincident stack of 50 nodes      topmost returned; all 50 found
+```
+
+That last one matters: d3-quadtree chains exactly-coincident points into a
+linked list on one leaf rather than subdividing forever, and a layout mid-tween
+can stack nodes precisely. Reading only `leaf.data` and not walking `leaf.next`
+would silently lose them — it is the one thing in the file that looks like
+boilerplate and isn't.
+
+Cost:
+
+| fixture | tree build | findNode (hit) | edge pick (miss) | marquee frame | drag write |
+|---------|-----------|----------------|------------------|---------------|------------|
+| 50      | 0.00 ms   | 0.3 µs         | 0.00 ms          | 0.00 ms       | 0.002 ms   |
+| 500     | 0.03 ms   | 0.4 µs         | 0.04 ms          | 0.02 ms       | 0.016 ms   |
+| 2,000   | 0.14 ms   | 0.5 µs         | 0.21 ms          | 0.08 ms       | 0.066 ms   |
+| 10,000  | 0.83 ms   | 0.7 µs         | 1.49 ms          | 0.50 ms       | 0.073 ms   |
+
+`findNode` is essentially flat from 50 to 10,000 nodes — 0.3 µs to 0.7 µs for a
+200x increase — which is the quadtree doing its job. The marquee frame is a
+query plus the implied-edge scan, catching 1,818 nodes at the 10k fixture.
+"Drag write" is select-everything-then-drag, the worst case.
+
+The gesture state machine passes 34 checks in `verify-gestures.ts`, driving the
+real controller and the real selection store with `$state` shimmed to identity:
+click/shift-click/toggle, pan by screen delta, drag at 0.25x zoom moving 4 graph
+units per pixel, rigid multi-node drag, sub-threshold movement staying a click,
+cancelled drag restoring positions exactly, marquee normalisation dragging up
+and left, shrink-deselects, and both-endpoints-inside for implied edges.
+
+### Known limitations, carried forward
+
+- **Still not verified in a browser.** Same caveat as phases 2 and 3: typecheck,
+  production build, dev-server transform of every new module, and all the logic
+  above pass, but no frame has been seen. Phase 9's Playwright tests are where
+  this stops being true.
+- The quadtree is stale during a layout tween (420 ms), so a click mid-animation
+  can pick the wrong node. Rebuilding per frame costs more than the tween does.
+- `writeEdgeGeometry` does two `Map.get` calls per edge per frame — 29,478 at
+  the 10k fixture, in the main draw loop, and again in every edge pick. An
+  `Int32Array` of endpoint node indices per edge would remove all of them. This
+  is the most obvious remaining win and phase 5 should take it.
+- A drag can drop a node on top of another; there is no overlap resolution, same
+  as the incremental-layout limitation from phase 2.
+- Marquee edge selection rescans all edges per frame. At 10k that is inside the
+  0.50 ms figure above, so it is not urgent, but it is linear in edges rather
+  than in what the box caught.
+- No hover feedback and no cursor change over a node. Not asked for, and it
+  would mean a hit test on every pointermove plus a redraw to show it.

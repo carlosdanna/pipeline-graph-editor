@@ -8,6 +8,13 @@ import { addDownstreamStage, pickUpstreamCandidate } from '$lib/graph/mutate';
 import type { PositionStore } from '$lib/graph/positions';
 import type { NodeDynamics, PipelineGraph } from '$lib/graph/types';
 import { validateGraph, type ValidationResult } from '$lib/graph/validate';
+import {
+	InteractionController,
+	type InteractionHost,
+	type InteractionScene
+} from '$lib/interact/controller';
+import { NodeQuadtree } from '$lib/interact/quadtree';
+import { SelectionStore } from '$lib/interact/selection.svelte';
 import { PositionAnimator, snapTo } from '$lib/layout/animate';
 import { LayoutCancelledError, LayoutClient } from '$lib/layout/client';
 import {
@@ -100,7 +107,7 @@ function buildFixtureState(size: FixtureSize): FixtureState {
 	};
 }
 
-export class GraphSession {
+export class GraphSession implements InteractionHost {
 	fixture = $state.raw<FixtureState>(buildFixtureState(50));
 	/** Bumped whenever the animator writes into `fixture.positions`. */
 	positionsVersion = $state(0);
@@ -120,8 +127,37 @@ export class GraphSession {
 	readonly perf = new PerfMonitor();
 	readonly renderer = new HybridRenderer(this.viewport, this.perf);
 
+	/**
+	 * Selection is reactive only in its summary — the flag arrays behind it are
+	 * read straight by the canvas. See selection.svelte.ts.
+	 */
+	readonly selection = new SelectionStore(
+		this.fixture.graph.nodes.length,
+		this.fixture.graph.edges.length
+	);
+	readonly interaction = new InteractionController(this);
+
+	/** Build time of the current spatial index, for the stats strip. */
+	treeBuildMs = $state<number | null>(null);
+
 	#client = new LayoutClient();
 	#animator = new PositionAnimator();
+
+	/**
+	 * The spatial index for picking. Not reactive: it is read by pointer
+	 * handlers and nothing in a template derives from it.
+	 *
+	 * Rebuilt only when the geometry has *settled* — after a layout animation
+	 * finishes, after a snap, after a drag ends, and after a structural change.
+	 * Never per animation frame: a 10k rebuild costs a whole frame budget, and
+	 * nothing picks anything mid-animation anyway.
+	 */
+	#tree: NodeQuadtree | null = null;
+
+	constructor() {
+		this.renderer.setInput(this.interaction);
+		this.#rebuildTree();
+	}
 
 	get graph(): PipelineGraph {
 		return this.fixture.graph;
@@ -133,7 +169,13 @@ export class GraphSession {
 
 	async loadFixture(size: FixtureSize): Promise<void> {
 		this.#animator.stop();
+		this.interaction.cancel();
 		this.fixture = buildFixtureState(size);
+		this.selection.resize(this.fixture.graph.nodes.length, this.fixture.graph.edges.length);
+		this.selection.clear();
+		// Build against the placeholder layout so the graph is pickable in the
+		// same frame it appears, rather than only once ELK answers.
+		this.#rebuildTree();
 		this.positionsVersion++;
 		this.layoutPhase = 'placeholder';
 		this.lastRun = null;
@@ -214,6 +256,10 @@ export class GraphSession {
 			validation: validateGraph(mutation.graph, index)
 		};
 		this.fixture = next;
+		// Node and edge indices are append-only, so this keeps every existing
+		// selection intact and simply makes room on the end.
+		this.selection.resize(next.graph.nodes.length, next.graph.edges.length);
+		this.#rebuildTree();
 		this.positionsVersion++;
 
 		const region = dirtyRegion(next.graph, next.index, mutation.addedIndices);
@@ -282,22 +328,101 @@ export class GraphSession {
 		this.benchmarkRunning = false;
 	}
 
+	// --- InteractionHost -----------------------------------------------------
+	//
+	// The controller is handed this object rather than a dozen callbacks. Every
+	// method here is one sentence long, which is the point: the session owns
+	// *what exists*, the controller owns *what a gesture means*, and this is the
+	// entire surface between them.
+
+	scene(): InteractionScene | null {
+		if (!this.#tree) return null;
+		const state = this.fixture;
+		return {
+			graph: state.graph,
+			index: state.index,
+			positions: state.positions,
+			tree: this.#tree
+		};
+	}
+
+	schedule(): void {
+		this.renderer.schedule();
+	}
+
+	/**
+	 * A drag wrote into the position arrays. The canvas is redrawn directly and
+	 * the version counter is bumped for the DOM node layer — exactly what a
+	 * layout tween does, because it is exactly the same kind of change: geometry
+	 * moved, structure did not.
+	 */
+	positionsWritten(): void {
+		this.renderer.schedule();
+		this.positionsVersion++;
+	}
+
+	dragStarted(): void {
+		// A layout tween and a pointer both writing the same Float32Array would
+		// fight, and the tween would win every frame.
+		this.#animator.stop();
+	}
+
+	dragEnded(): void {
+		this.#rebuildTree();
+	}
+
+	/** Frames the current selection, or the whole graph if nothing is selected. */
+	fitSelection(): void {
+		const state = this.fixture;
+		if (this.selection.nodeCount === 0) {
+			this.renderer.requestFit();
+			return;
+		}
+
+		const flags = this.selection.nodeFlags;
+		let minX = Infinity;
+		let minY = Infinity;
+		let maxX = -Infinity;
+		let maxY = -Infinity;
+		for (let i = 0; i < flags.length; i++) {
+			if (flags[i] !== 1) continue;
+			const node = state.graph.nodes[i];
+			const x = state.positions.x[i];
+			const y = state.positions.y[i];
+			if (x < minX) minX = x;
+			if (y < minY) minY = y;
+			if (x + node.width > maxX) maxX = x + node.width;
+			if (y + node.height > maxY) maxY = y + node.height;
+		}
+
+		this.renderer.fitTo({ x: minX, y: minY, width: maxX - minX, height: maxY - minY });
+	}
+
+	#rebuildTree(): void {
+		const state = this.fixture;
+		this.#tree = new NodeQuadtree(state.graph, state.positions);
+		this.treeBuildMs = this.#tree.buildMs;
+	}
+
 	#apply(targets: PositionTargets, animate: boolean): void {
 		const positions = this.fixture.positions;
 		if (animate) {
-			// `_done` is unused for now; phase 4 rebuilds the quadtree on it, once
-			// the graph has settled rather than on every tween frame.
-			this.#animator.start(positions, targets, (_done) => {
+			this.#animator.start(positions, targets, (done) => {
 				// Schedule the canvas redraw directly rather than waiting for the
 				// version bump to travel through Svelte and back; that would put
 				// the canvas one frame behind the DOM node layer.
 				this.renderer.schedule();
 				this.positionsVersion++;
+				// Only on the last frame: the index describes where things ended
+				// up, and rebuilding it 25 times during a tween would cost more
+				// than the tween.
+				if (done) this.#rebuildTree();
 			});
 		} else {
 			snapTo(positions, targets);
 			this.renderer.schedule();
 			this.positionsVersion++;
+			this.#rebuildTree();
 		}
 	}
 

@@ -2,6 +2,7 @@
 	import type { GraphIndex } from '$lib/graph/indexing';
 	import type { PositionStore } from '$lib/graph/positions';
 	import type { NodeDynamics, PipelineGraph } from '$lib/graph/types';
+	import type { SelectionStore } from '$lib/interact/selection.svelte';
 	import { buildEdgeBuckets } from '$lib/render/edge-buckets';
 	import type { HybridRenderer } from '$lib/render/hybrid-renderer';
 	import { DOM_NODE_LIMIT } from '$lib/render/limits';
@@ -20,12 +21,20 @@
 		index: GraphIndex;
 		positions: PositionStore;
 		dynamics: readonly NodeDynamics[];
+		/**
+		 * Selection is passed through to the canvas, not used in this template.
+		 * Nothing here binds a `.selected` class: selection is drawn on the
+		 * canvas precisely so a marquee over 2,000 nodes costs no DOM work. See
+		 * selection.svelte.ts.
+		 */
+		selection: SelectionStore;
 		/** Bumped when positions are written in place; see session.svelte.ts. */
 		geometryVersion: number;
 		renderer: HybridRenderer;
 	}
 
-	let { graph, index, positions, dynamics, geometryVersion, renderer }: Props = $props();
+	let { graph, index, positions, dynamics, selection, geometryVersion, renderer }: Props =
+		$props();
 
 	const buckets = $derived(buildEdgeBuckets(graph));
 	const nodesAreDom = $derived(graph.nodes.length <= DOM_NODE_LIMIT);
@@ -34,7 +43,7 @@
 	// The renderer decides when to draw; this only tells it what to draw.
 	$effect(() => {
 		void geometryVersion;
-		renderer.setScene({ graph, index, positions, buckets });
+		renderer.setScene({ graph, index, positions, buckets, selection });
 	});
 
 	// Rebuilt whenever positions move, which during a layout tween is every
@@ -69,8 +78,9 @@
 	{:else}
 		<p class="overflow">
 			{graph.nodes.length.toLocaleString()} nodes exceeds the {DOM_NODE_LIMIT.toLocaleString()} DOM
-			limit — edges and the grid are still drawn, and pan and zoom still work. Phase 5 draws nodes
-			on the canvas above this threshold.
+			limit — edges, ports and selection are still drawn, and pan, zoom, picking and dragging all
+			still work, because none of them go through a node element. Phase 5 draws nodes on the
+			canvas above this threshold.
 		</p>
 	{/if}
 </div>
@@ -104,9 +114,10 @@
 		left: 0;
 		transform-origin: 0 0;
 		/*
-		 * All interaction goes through the surface and, from phase 4, the
-		 * quadtree — never through a node's own event target. That keeps the
-		 * interaction model identical whether nodes are DOM elements or pixels.
+		 * All interaction goes through the surface and the quadtree — never
+		 * through a node's own event target. That keeps the interaction model
+		 * identical whether nodes are DOM elements or pixels, which is what lets
+		 * phase 5 switch between them at runtime with no change to picking.
 		 */
 		pointer-events: none;
 		will-change: transform;
